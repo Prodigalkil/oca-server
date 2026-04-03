@@ -1,0 +1,8 @@
+# OCA API Keys
+# Format: KEY owner_name
+# Add one per line. Lines starting with # are comments.
+# Generate keys at: https://www.uuidgenerator.net/ or use any random string 20+ chars
+#
+# Example:
+# OCA-abc123def456ghi789 Prodigal
+# OCA-xyz987uvw654rst321 FactionMember1
