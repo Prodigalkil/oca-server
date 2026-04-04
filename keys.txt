@@ -6,6 +6,6 @@
 # Example:
 # OCA-abc123def456ghi789 Prodigal
 # OCA-xyz987uvw654rst321 FactionMember1
-OCA-M50310-Prodigal Prodigal
-OCA-L50310-UncleLeeLee UncleLeeLee
+OCA-L50310-Prodigal Prodigal
+OCA-M50310-UncleLeeLee UncleLeeLee
 OCA-M50310-OddlySpecific OddlySpecific
