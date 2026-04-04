@@ -6,4 +6,4 @@
 # Example:
 # OCA-abc123def456ghi789 Prodigal
 # OCA-xyz987uvw654rst321 FactionMember1
-OCA-Prodigal2024secretkey Prodigal
+OCA-L001-Prodigal Prodigal
