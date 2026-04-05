@@ -1705,7 +1705,9 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     const _empPayout = _empData?.samples >= 5 ? _empData.meanPayout : 0;
     const _thPayout  = _meta.rewardType === 'cash' ? (_meta.maxPayout || 1) : (FLOWCHARTS[oc.ocName]?.level||1)*1000000;
     const _basis     = _empPayout > 0 ? _empPayout : _thPayout;
-    const projectedEV = (projected?.expectedValue || 0) * _basis;
+    // Level bonus (5% per level): ensures L6 ranks above L4 for same member with adequate CPR
+    const _lvlBonus  = 1 + ((FLOWCHARTS[oc.ocName]?.level || 1) - 1) * 0.05;
+    const projectedEV = (projected?.expectedValue || 0) * _basis * _lvlBonus;
 
     // Determine status
     let status = 'optimal';
@@ -1901,7 +1903,7 @@ setInterval(async () => {
 app.get('/', (req, res) => {
   res.json({
     status:  'ok',
-    version: '2.6.0',
+    version: '2.7.0',
     ocs:     Object.keys(FLOWCHARTS).length,
   });
 });
@@ -2567,7 +2569,7 @@ app.get('/api/payout/model', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, () => {
-    console.log(`[SERVER] Hive OC Advisor v2.6.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v2.7.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 });
