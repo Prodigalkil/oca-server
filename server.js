@@ -36,6 +36,31 @@ async function query(sql, params) {
 }
 
 
+
+// ── POST /api/cpr/cleanup — remove numeric-ID keyed entries (one-time cleanup) ──
+app.post('/api/cpr/cleanup', async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  if(!isLeaderKey(key)) return res.status(403).json({ error: 'Leader key required' });
+
+  const factionId = getFactionId(key);
+  try {
+    const result = await query(
+      `DELETE FROM member_cpr
+       WHERE faction_id = $1
+       AND member_name ~ '^[0-9]+$'`,
+      [factionId]
+    );
+    await invalidateCache(factionId);
+    console.log('[CPR CLEANUP] Removed', result.rowCount, 'numeric-ID entries for faction', factionId);
+    res.json({ ok: true, removed: result.rowCount });
+  } catch(e) {
+    console.error('[CPR CLEANUP] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── GET /api/roles — role colour classifications for all OCs ─────────────────
 app.get('/api/roles', async (req, res) => {
   const owner = await validateKey(req, res);
@@ -1672,7 +1697,7 @@ app.post('/api/cpr/batch', rateLimit('cpr_batch'), async (req, res) => {
     }
     await client.query('COMMIT');
     await invalidateCache(factionId);
-    res.json({ ok: true, updated, factionId });
+    res.json({ ok: true, updated, skipped: skipped || 0, factionId });
   } catch(e) {
     await client.query('ROLLBACK');
     console.error('[CPR BATCH] Error:', e.message);
@@ -1921,6 +1946,31 @@ app.get('/api/optimize/cache', async (req, res) => {
   }
 });
 
+
+
+// ── POST /api/cpr/cleanup — remove numeric-ID keyed entries (one-time cleanup) ──
+app.post('/api/cpr/cleanup', async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  if(!isLeaderKey(key)) return res.status(403).json({ error: 'Leader key required' });
+
+  const factionId = getFactionId(key);
+  try {
+    const result = await query(
+      `DELETE FROM member_cpr
+       WHERE faction_id = $1
+       AND member_name ~ '^[0-9]+$'`,
+      [factionId]
+    );
+    await invalidateCache(factionId);
+    console.log('[CPR CLEANUP] Removed', result.rowCount, 'numeric-ID entries for faction', factionId);
+    res.json({ ok: true, removed: result.rowCount });
+  } catch(e) {
+    console.error('[CPR CLEANUP] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ── GET /api/roles — role colour classifications for all OCs ─────────────────
 app.get('/api/roles', async (req, res) => {
