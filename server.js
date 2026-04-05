@@ -35,6 +35,110 @@ async function query(sql, params) {
   }
 }
 
+
+// ── GET /api/roles — role colour classifications for all OCs ─────────────────
+app.get('/api/roles', async (req, res) => {
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  res.json({ roles: ROLE_COLORS });
+});
+
+// ── POST /api/cpr/history — push CPR data extracted from completed OC history ─
+// Body: { records: [{ memberName, ocName, role, cpr }] }
+// Leader only — pulled from Torn API completed crimes tab
+app.post('/api/cpr/history', rateLimit('cpr_history'), async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  if(!isLeaderKey(key)) return res.status(403).json({ error: 'Leader key required' });
+
+  const { records } = req.body;
+  if(!Array.isArray(records) || records.length === 0) {
+    return res.status(400).json({ error: 'records must be a non-empty array' });
+  }
+  if(records.length > 500) {
+    return res.status(400).json({ error: 'Max 500 records per push' });
+  }
+
+  const factionId = getFactionId(key);
+  let updated = 0;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Group records by member name
+    const byMember = {};
+    records.forEach(({ memberName, ocName, role, cpr }) => {
+      if(!memberName || !ocName || !role || cpr === undefined) return;
+      if(!byMember[memberName]) byMember[memberName] = {};
+      if(!byMember[memberName][ocName]) byMember[memberName][ocName] = {};
+      // Only update if newer CPR value (history may have old entries)
+      // We take the HIGHEST CPR seen as most recent best performance
+      const existing = byMember[memberName][ocName][role];
+      if(existing === undefined || cpr > existing) {
+        byMember[memberName][ocName][role] = cpr;
+      }
+    });
+
+    for(const [memberName, cprs] of Object.entries(byMember)) {
+      // Merge with existing CPR data — history fills gaps, doesn't overwrite tornstats
+      await client.query(
+        `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
+         VALUES ($1, $2, 'history', $3, NOW())
+         ON CONFLICT (faction_id, member_name)
+         DO UPDATE SET
+           cprs = member_cpr.cprs || $3::jsonb,
+           updated_at = NOW()`,
+        [factionId, memberName, JSON.stringify(cprs)]
+      );
+      updated++;
+    }
+
+    await client.query('COMMIT');
+    await invalidateCache(factionId);
+    console.log('[CPR HISTORY] Updated', updated, 'members for faction', factionId);
+    res.json({ ok: true, updated, recordsProcessed: records.length });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    console.error('[CPR HISTORY] Error:', e.message);
+    res.status(500).json({ error: 'Failed to store history CPR data' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── GET /api/cpr/status — CPR coverage report for leader ─────────────────────
+app.get('/api/cpr/status', async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  if(!isLeaderKey(key)) return res.status(403).json({ error: 'Leader key required' });
+
+  const factionId = getFactionId(key);
+  try {
+    const result = await query(
+      `SELECT member_name, source, cprs, updated_at
+       FROM member_cpr WHERE faction_id = $1
+       ORDER BY member_name ASC`,
+      [factionId]
+    );
+
+    const members = result.rows.map(row => ({
+      name:      row.member_name,
+      source:    row.source,
+      updatedAt: row.updated_at,
+      isStale:   Date.now() - new Date(row.updated_at).getTime() > 7 * 24 * 60 * 60 * 1000,
+      ocCount:   Object.keys(row.cprs || {}).length,
+      ocs:       Object.keys(row.cprs || {}),
+    }));
+
+    res.json({ members, totalWithData: members.length });
+  } catch(e) {
+    res.status(500).json({ error: 'Failed to load CPR status' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // STARTUP — verify DB connection and migrate keys.txt if needed
 // ═══════════════════════════════════════════════════════════════
@@ -165,9 +269,10 @@ async function validateKey(req, res) {
 const RATE_LIMITS = {
   'score':          { max: 120, window: 60000 },
   'score_batch':    { max: 30,  window: 60000 },
-  'optimize':       { max: 6,   window: 60000 },
+  'optimize':       { max: 20,  window: 60000 }, // increased — caching handles heavy load
   'cpr':            { max: 20,  window: 60000 },
   'cpr_batch':      { max: 10,  window: 60000 },
+  'cpr_history':    { max: 5,   window: 60000 },
   'assign':         { max: 30,  window: 60000 },
   'assignments':    { max: 60,  window: 60000 },
   'assignment':     { max: 60,  window: 60000 },
@@ -871,6 +976,47 @@ const FLOWCHARTS = {
   },
 };
 
+
+// ═══════════════════════════════════════════════════════════════
+// ROLE COLOUR CLASSIFICATION (from flowchart fail-path analysis)
+// red    = every checkpoint fail leads to payout:0
+// yellow = some fail paths dead, some recover
+// green  = fail never leads to payout:0
+// ═══════════════════════════════════════════════════════════════
+
+const ROLE_COLORS = {};
+
+function computeRoleColors() {
+  Object.entries(FLOWCHARTS).forEach(([ocName, oc]) => {
+    const nodes = oc.nodes;
+    ROLE_COLORS[ocName] = {};
+    const roleDeadFail = new Map();
+    const roleSafeFail = new Map();
+    const roleTotal    = new Map();
+
+    Object.entries(nodes).forEach(([nodeId, node]) => {
+      if(node.end) return;
+      const roles = node.roles || (node.role ? [node.role] : []);
+      roles.forEach(r => {
+        roleTotal.set(r, (roleTotal.get(r) || 0) + 1);
+        const failNode = nodes[node.fail];
+        const isDead = failNode && failNode.end && failNode.payout === 0;
+        if(isDead) roleDeadFail.set(r, (roleDeadFail.get(r) || 0) + 1);
+        else        roleSafeFail.set(r, (roleSafeFail.get(r) || 0) + 1);
+      });
+    });
+
+    roleTotal.forEach((total, role) => {
+      const dead = roleDeadFail.get(role) || 0;
+      const safe = roleSafeFail.get(role) || 0;
+      if(dead > 0 && safe === 0)       ROLE_COLORS[ocName][role] = 'red';
+      else if(dead === 0 && safe > 0)  ROLE_COLORS[ocName][role] = 'green';
+      else                              ROLE_COLORS[ocName][role] = 'yellow';
+    });
+  });
+  console.log('[SERVER] Role colours computed for', Object.keys(ROLE_COLORS).length, 'OCs');
+}
+
 // ── SIMULATION ────────────────────────────────────────────────────────────────
 const BASELINE = 68;
 
@@ -1187,6 +1333,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
       memberStatus: item.memberStatus,
       cpr:          item.cpr,
       roleType:     item.roleType,
+      roleColor:    ROLE_COLORS[item.ocName]?.[item.role] || 'yellow',
       impact:       parseFloat(item.delta.toFixed(1)),
       flag:         item.flag,
       stale:        item.stale,
@@ -1774,13 +1921,118 @@ app.get('/api/optimize/cache', async (req, res) => {
   }
 });
 
+
+// ── GET /api/roles — role colour classifications for all OCs ─────────────────
+app.get('/api/roles', async (req, res) => {
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  res.json({ roles: ROLE_COLORS });
+});
+
+// ── POST /api/cpr/history — push CPR data extracted from completed OC history ─
+// Body: { records: [{ memberName, ocName, role, cpr }] }
+// Leader only — pulled from Torn API completed crimes tab
+app.post('/api/cpr/history', rateLimit('cpr_history'), async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  if(!isLeaderKey(key)) return res.status(403).json({ error: 'Leader key required' });
+
+  const { records } = req.body;
+  if(!Array.isArray(records) || records.length === 0) {
+    return res.status(400).json({ error: 'records must be a non-empty array' });
+  }
+  if(records.length > 500) {
+    return res.status(400).json({ error: 'Max 500 records per push' });
+  }
+
+  const factionId = getFactionId(key);
+  let updated = 0;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Group records by member name
+    const byMember = {};
+    records.forEach(({ memberName, ocName, role, cpr }) => {
+      if(!memberName || !ocName || !role || cpr === undefined) return;
+      if(!byMember[memberName]) byMember[memberName] = {};
+      if(!byMember[memberName][ocName]) byMember[memberName][ocName] = {};
+      // Only update if newer CPR value (history may have old entries)
+      // We take the HIGHEST CPR seen as most recent best performance
+      const existing = byMember[memberName][ocName][role];
+      if(existing === undefined || cpr > existing) {
+        byMember[memberName][ocName][role] = cpr;
+      }
+    });
+
+    for(const [memberName, cprs] of Object.entries(byMember)) {
+      // Merge with existing CPR data — history fills gaps, doesn't overwrite tornstats
+      await client.query(
+        `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
+         VALUES ($1, $2, 'history', $3, NOW())
+         ON CONFLICT (faction_id, member_name)
+         DO UPDATE SET
+           cprs = member_cpr.cprs || $3::jsonb,
+           updated_at = NOW()`,
+        [factionId, memberName, JSON.stringify(cprs)]
+      );
+      updated++;
+    }
+
+    await client.query('COMMIT');
+    await invalidateCache(factionId);
+    console.log('[CPR HISTORY] Updated', updated, 'members for faction', factionId);
+    res.json({ ok: true, updated, recordsProcessed: records.length });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    console.error('[CPR HISTORY] Error:', e.message);
+    res.status(500).json({ error: 'Failed to store history CPR data' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── GET /api/cpr/status — CPR coverage report for leader ─────────────────────
+app.get('/api/cpr/status', async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  if(!isLeaderKey(key)) return res.status(403).json({ error: 'Leader key required' });
+
+  const factionId = getFactionId(key);
+  try {
+    const result = await query(
+      `SELECT member_name, source, cprs, updated_at
+       FROM member_cpr WHERE faction_id = $1
+       ORDER BY member_name ASC`,
+      [factionId]
+    );
+
+    const members = result.rows.map(row => ({
+      name:      row.member_name,
+      source:    row.source,
+      updatedAt: row.updated_at,
+      isStale:   Date.now() - new Date(row.updated_at).getTime() > 7 * 24 * 60 * 60 * 1000,
+      ocCount:   Object.keys(row.cprs || {}).length,
+      ocs:       Object.keys(row.cprs || {}),
+    }));
+
+    res.json({ members, totalWithData: members.length });
+  } catch(e) {
+    res.status(500).json({ error: 'Failed to load CPR status' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════════════════
 
+computeRoleColors();
 startup().then(() => {
   app.listen(PORT, () => {
-    console.log(`[SERVER] Hive OC Advisor v2.0.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v2.2.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 });
