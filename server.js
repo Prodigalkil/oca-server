@@ -61,11 +61,56 @@ app.post('/api/cpr/cleanup', async (req, res) => {
   }
 });
 
-// ── GET /api/roles — role colour classifications for all OCs ─────────────────
+// ── GET /api/roles — role colour classifications + checkpoint context ─────────
 app.get('/api/roles', async (req, res) => {
   const owner = await validateKey(req, res);
   if(!owner) return;
-  res.json({ roles: ROLE_COLORS });
+
+  // Build checkpoint context for each role in each OC
+  // This powers the hover tooltips on the advisor page
+  const roleContext = {};
+  Object.entries(FLOWCHARTS).forEach(([ocName, oc]) => {
+    roleContext[ocName] = {};
+    const nodes = oc.nodes;
+
+    // For each role, find its checkpoints and describe what happens on fail
+    const roleInfo = {};
+    Object.entries(nodes).forEach(([nodeId, node]) => {
+      if(node.end) return;
+      const roles = node.roles || (node.role ? [node.role] : []);
+      roles.forEach(role => {
+        if(!roleInfo[role]) roleInfo[role] = { checkpoints: 0, deadEnds: 0, recoveries: 0, isStart: false };
+        roleInfo[role].checkpoints++;
+        if(nodeId === oc.start) roleInfo[role].isStart = true;
+        const failNode = nodes[node.fail];
+        if(failNode?.end && failNode?.payout === 0) roleInfo[role].deadEnds++;
+        else roleInfo[role].recoveries++;
+      });
+    });
+
+    Object.entries(roleInfo).forEach(([role, info]) => {
+      const color = ROLE_COLORS[ocName]?.[role] || 'yellow';
+      let desc = '';
+      if(color === 'red') {
+        desc = 'Critical — failure always ends the OC';
+      } else if(info.deadEnds > 0 && info.recoveries > 0) {
+        desc = `Mixed — ${info.deadEnds} dead-end${info.deadEnds>1?'s':''}, ${info.recoveries} recovery path${info.recoveries>1?'s':''}`;
+      } else {
+        desc = 'Safe — failure never kills the OC';
+      }
+      if(info.isStart) desc = '⚡ Gate role. ' + desc;
+      roleContext[ocName][role] = {
+        color,
+        checkpoints: info.checkpoints,
+        deadEnds:    info.deadEnds,
+        recoveries:  info.recoveries,
+        isStart:     info.isStart,
+        desc,
+      };
+    });
+  });
+
+  res.json({ roles: ROLE_COLORS, context: roleContext });
 });
 
 // ── POST /api/cpr/history — push CPR data extracted from completed OC history ─
@@ -164,11 +209,131 @@ app.get('/api/cpr/status', async (req, res) => {
   }
 });
 
+
+// ── POST /api/payout/record — store completed OC payout data ─────────────────
+// Body: { records: [{ ocName, executedAt, money, respect, itemIds, slotCPRs, payoutPct }] }
+app.post('/api/payout/record', rateLimit('cpr_history'), async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  if(!isLeaderKey(key)) return res.status(403).json({ error: 'Leader key required' });
+
+  const { records } = req.body;
+  if(!Array.isArray(records) || records.length === 0)
+    return res.status(400).json({ error: 'records must be a non-empty array' });
+  if(records.length > 200)
+    return res.status(400).json({ error: 'Max 200 records per push' });
+
+  const factionId = getFactionId(key);
+  let inserted = 0;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for(const r of records) {
+      const { ocName, executedAt, money, respect, itemIds, slotCPRs, payoutPct } = r;
+      if(!ocName || !executedAt) continue;
+      // Normalise to 100% payout so we can compare across different split percentages
+      const pct = payoutPct > 0 ? payoutPct : 100;
+      const maxMoney = pct < 100 ? Math.round((money || 0) / pct * 100) : (money || 0);
+
+      // Avoid duplicate records for same OC execution
+      const exists = await client.query(
+        'SELECT 1 FROM oc_payouts WHERE faction_id=$1 AND oc_name=$2 AND executed_at=$3',
+        [factionId, ocName, executedAt]
+      );
+      if(exists.rows.length > 0) continue;
+
+      await client.query(
+        `INSERT INTO oc_payouts
+           (faction_id, oc_name, executed_at, money, respect, item_ids, slot_cprs, payout_pct, max_money)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [factionId, ocName, executedAt, money||0, respect||0,
+         JSON.stringify(itemIds||[]), JSON.stringify(slotCPRs||{}), pct, maxMoney]
+      );
+      inserted++;
+    }
+    await client.query('COMMIT');
+    console.log('[PAYOUT] Inserted', inserted, 'records for faction', factionId);
+    res.json({ ok: true, inserted, total: records.length });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    console.error('[PAYOUT] Error:', e.message);
+    res.status(500).json({ error: 'Failed to store payout records' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── GET /api/payout/model — empirical payout model per OC ────────────────────
+app.get('/api/payout/model', async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+
+  const factionId = getFactionId(key);
+  try {
+    const result = await query(
+      `SELECT oc_name,
+              COUNT(*)                        AS samples,
+              AVG(max_money)::BIGINT          AS mean_payout,
+              PERCENTILE_CONT(0.5)
+                WITHIN GROUP (ORDER BY max_money)::BIGINT AS median_payout,
+              MAX(max_money)::BIGINT          AS max_observed,
+              MIN(max_money)::BIGINT          AS min_observed,
+              AVG(respect)                    AS mean_respect,
+              MAX(executed_at)                AS last_seen
+       FROM oc_payouts
+       WHERE faction_id = $1 AND max_money >= 0
+       GROUP BY oc_name
+       ORDER BY mean_payout DESC`,
+      [factionId]
+    );
+
+    const model = {};
+    result.rows.forEach(row => {
+      model[row.oc_name] = {
+        samples:      parseInt(row.samples),
+        meanPayout:   parseInt(row.mean_payout),
+        medianPayout: parseInt(row.median_payout),
+        maxObserved:  parseInt(row.max_observed),
+        minObserved:  parseInt(row.min_observed),
+        meanRespect:  parseFloat(parseFloat(row.mean_respect).toFixed(1)),
+        lastSeen:     parseInt(row.last_seen),
+      };
+    });
+
+    res.json({ model, factionId });
+  } catch(e) {
+    console.error('[PAYOUT MODEL] Error:', e.message);
+    res.status(500).json({ error: 'Failed to load payout model' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // STARTUP — verify DB connection and migrate keys.txt if needed
 // ═══════════════════════════════════════════════════════════════
 
 async function startup() {
+  // Create oc_payouts table if not exists
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS oc_payouts (
+        id          SERIAL PRIMARY KEY,
+        faction_id  TEXT NOT NULL,
+        oc_name     TEXT NOT NULL,
+        executed_at BIGINT NOT NULL,
+        money       BIGINT NOT NULL DEFAULT 0,
+        respect     INT    NOT NULL DEFAULT 0,
+        item_ids    JSONB  NOT NULL DEFAULT '[]',
+        slot_cprs   JSONB  NOT NULL DEFAULT '{}',
+        payout_pct  INT    NOT NULL DEFAULT 100,
+        max_money   BIGINT NOT NULL DEFAULT 0,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS idx_oc_payouts_faction_oc ON oc_payouts(faction_id, oc_name)`);
+  } catch(e) { console.warn('[DB] oc_payouts table setup:', e.message); }
+
   try {
     await query('SELECT 1');
     console.log('[DB] PostgreSQL connected');
@@ -434,10 +599,10 @@ const FLOWCHARTS = {
       '_A1_C3_':{roles:['Car Thief','Techie','Thief'],pass:'_A2_C1_',fail:'_A1F_'},
       '_A2_C3_':{role:'Engineer',pass:'_A3_C1_',fail:'_A2F_'},
       '_A6_C1_':{role:'Techie',pass:'_A7S_',fail:'_B8_C1_'},
-      '_B8S_':{end:true,payout:0},'_A7S_':{end:true,payout:0},'_B9S_':{end:true,payout:0},
+      '_B8S_':{end:true,payout:1.0},'_A7S_':{end:true,payout:1.0},'_B9S_':{end:true,payout:1.0},
       '_B6F_':{end:true,payout:0},'_B4F_':{end:true,payout:0},'_B8F_':{end:true,payout:0},
       '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
-      '_B7S_':{end:true,payout:0},'_B5F_':{end:true,payout:0},
+      '_B7S_':{end:true,payout:1.0},'_B5F_':{end:true,payout:0},
     }
   },
   'Blast from the Past': {
@@ -520,11 +685,11 @@ const FLOWCHARTS = {
       '_B1_C1_':{role:'Muscle 1',pass:'_B1F3_',fail:'_B1_C2_'},
       '_B1_C2_':{role:'Muscle 2',pass:'_B1F2_',fail:'_B1F1_'},
       '_A8S1_':{end:true,payout:1.0},'_A8S2_':{end:true,payout:0.9528},
-      '_B7S1_':{end:true,payout:0.7317},'_B7S2_':{end:true,payout:0.6364},
-      '_B8S_':{end:true,payout:0.5609},'_A4S_':{end:true,payout:0.4697},
-      '_B1F3_':{end:true,payout:0},'_B1F2_':{end:true,payout:0},'_B1F1_':{end:true,payout:0},
-      '_A4F_':{end:true,payout:0},'_A5F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},
-      '_A1F_':{end:true,payout:0},
+      '_B7S1_':{end:true,payout:0.8529},'_B7S2_':{end:true,payout:0.7983},
+      '_B8S_':{end:true,payout:0.6593},'_A4S_':{end:true,payout:0.6136},
+      '_B1F3_':{end:true,payout:0},'_B1F2_':{end:true,payout:0},
+      '_A4F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},
+      '_A5F_':{end:true,payout:0},'_B1F1_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
     }
   },
   'Counter Offer': {
@@ -550,17 +715,27 @@ const FLOWCHARTS = {
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Techie',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Negotiator',pass:'_A3_C1_',fail:'_A2_C2_'},
-      '_A3_C1_':{role:'Techie',pass:'_A4_C1_',fail:'_A3_C2_'},
-      '_A4_C1_':{role:'Imitator',pass:'_A4S_',fail:'_A4_C2_'},
-      '_A4_C2_':{role:'Negotiator',pass:'_A4S2_',fail:'_A4F_'},
-      '_A1_C2_':{role:'Negotiator',pass:'_A2_C1_',fail:'_A1_C3_'},
-      '_A2_C2_':{role:'Techie',pass:'_A3_C1_',fail:'_A2_C3_'},
-      '_A3_C2_':{role:'Negotiator',pass:'_A4_C1_',fail:'_A3F_'},
-      '_A1_C3_':{role:'Techie',pass:'_A2_C1_',fail:'_A1F_'},
-      '_A2_C3_':{role:'Negotiator',pass:'_A3_C1_',fail:'_A2F_'},
-      '_A4S_':{end:true,payout:1.0},'_A4S2_':{end:true,payout:0.7692},
-      '_A4F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
-      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+      '_A2_C2_':{role:'Imitator',pass:'_A3_C1_',fail:'_B1_C1_'},
+      '_B1_C1_':{role:'Imitator',pass:'_B2_C1_',fail:'_B1_C2_'},
+      '_B1_C2_':{role:'Negotiator',pass:'_B2_C1_',fail:'_B1F_'},
+      '_A1_C2_':{role:'Negotiator',pass:'_A2_C1_',fail:'_A1F_'},
+      '_B2_C1_':{roles:['Negotiator','Techie'],pass:'_B3S_',fail:'_B2F_'},
+      '_A3_C1_':{role:'Imitator',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Negotiator',pass:'_A4_C1_',fail:'_A3_C3_'},
+      '_A4_C1_':{role:'Imitator',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{role:'Imitator',pass:'_A6_C1_',fail:'_A4F_'},
+      '_A6_C1_':{role:'Techie',pass:'_A8_C1_',fail:'_A6_C2_'},
+      '_A8_C1_':{role:'Negotiator',pass:'_A8S1_',fail:'_A8S2_'},
+      '_A3_C3_':{role:'Techie',pass:'_A4_C1_',fail:'_A3F_'},
+      '_A5_C1_':{role:'Techie',pass:'_A7_C1_',fail:'_A6_C1_'},
+      '_A6_C2_':{role:'Negotiator',pass:'_A8_C1_',fail:'_A6_C3_'},
+      '_A6_C3_':{role:'Imitator',pass:'_A6S_',fail:'_A6F_'},
+      '_A7_C1_':{roles:['Imitator','Negotiator'],pass:'_A7S_',fail:'_A7S2_'},
+      '_B3S_':{end:true,payout:0.5714},'_A8S2_':{end:true,payout:0.7435},
+      '_A8S1_':{end:true,payout:0.749},'_A6S_':{end:true,payout:0.6662},
+      '_A7S_':{end:true,payout:1.0},'_A7S2_':{end:true,payout:0.7754},
+      '_B2F_':{end:true,payout:0},'_A4F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},
+      '_A3F_':{end:true,payout:0},'_B1F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
     }
   },
   'Honey Trap': {
@@ -568,13 +743,27 @@ const FLOWCHARTS = {
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Enforcer',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Muscle 1',pass:'_A3_C1_',fail:'_A2_C2_'},
-      '_A3_C1_':{role:'Muscle 2',pass:'_A3S_',fail:'_A3_C2_'},
-      '_A3_C2_':{role:'Enforcer',pass:'_A3S2_',fail:'_A3F_'},
+      '_A2_C2_':{role:'Enforcer',pass:'_A3_C1_',fail:'_A2_C3_'},
+      '_A2_C3_':{role:'Muscle 2',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3_C1_':{role:'Enforcer',pass:'_A4_C1_',fail:'_B1_C1_'},
+      '_B1_C1_':{role:'Muscle 2',pass:'_B2_C1_',fail:'_B1_C2_'},
+      '_B1_C2_':{role:'Muscle 2',pass:'_B2_C1_',fail:'_B1F_'},
+      '_B2_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_B2S_',fail:'_B2_C2_'},
       '_A1_C2_':{role:'Muscle 1',pass:'_A2_C1_',fail:'_A1_C3_'},
-      '_A2_C2_':{role:'Muscle 2',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A4_C1_':{role:'Enforcer',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A5_C1_':{role:'Muscle 2',pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A5_C2_':{role:'Muscle 1',pass:'_A6_C2_',fail:'_A5F_'},
+      '_A6_C2_':{role:'Muscle 2',pass:'_A7_C1_',fail:'_A6S_'},
+      '_A7_C1_':{roles:['Enforcer','Muscle 1'],pass:'_A8S_',fail:'_A7S_'},
       '_A1_C3_':{role:'Muscle 2',pass:'_A2_C1_',fail:'_A1F_'},
-      '_A3S_':{end:true,payout:1.0},'_A3S2_':{end:true,payout:0.7246},
-      '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
+      '_A6_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A7_C1_',fail:'_A6_C2_'},
+      '_B2_C2_':{role:'Muscle 2',pass:'_B2S_',fail:'_B2F_'},
+      '_A4_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_A5_C2_',fail:'_A4F_'},
+      '_B2S_':{end:true,payout:0.6153},'_A8S_':{end:true,payout:1.0},
+      '_A6S_':{end:true,payout:0.721},'_A7S_':{end:true,payout:0.9084},
+      '_B2F_':{end:true,payout:0},'_A5F_':{end:true,payout:0},
+      '_A4F_':{end:true,payout:0},'_B1F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
     }
   },
   'Guardian Angels': {
@@ -583,14 +772,25 @@ const FLOWCHARTS = {
       '_A1_C1_':{role:'Hustler',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Engineer',pass:'_A3_C1_',fail:'_A2_C2_'},
       '_A3_C1_':{role:'Enforcer',pass:'_A4_C1_',fail:'_A3_C2_'},
-      '_A4_C1_':{roles:['Enforcer','Engineer'],pass:'_A4S_',fail:'_A4_C2_'},
-      '_A4_C2_':{role:'Hustler',pass:'_A4S2_',fail:'_A4F_'},
-      '_A1_C2_':{role:'Engineer',pass:'_A2_C1_',fail:'_A1F_'},
-      '_A2_C2_':{role:'Enforcer',pass:'_A3_C1_',fail:'_A2F_'},
-      '_A3_C2_':{roles:['Enforcer','Engineer'],pass:'_A4_C1_',fail:'_A3F_'},
-      '_A4S_':{end:true,payout:1.0},'_A4S2_':{end:true,payout:0.6923},
-      '_A4F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
-      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+      '_A4_C1_':{role:'Engineer',pass:'_A5_C1_',fail:'_B4_C1_'},
+      '_A5_C1_':{role:'Hustler',pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A5_C2_':{role:'Enforcer',pass:'_A6_C2_',fail:'_A5_C3_'},
+      '_A5_C3_':{role:'Enforcer',pass:'_A6_C2_',fail:'_A5F_'},
+      '_A6_C2_':{role:'Engineer',pass:'_A8S_',fail:'_A6_C3_'},
+      '_A6_C1_':{role:'Enforcer',pass:'_A7S_',fail:'_A6_C2_'},
+      '_A6_C3_':{role:'Hustler',pass:'_A9S_',fail:'_A6F_'},
+      '_B4_C1_':{roles:['Enforcer','Engineer'],pass:'_B5_C1_',fail:'_B4_C2_'},
+      '_B5_C1_':{role:'Hustler',pass:'_B6S_',fail:'_B5F_'},
+      '_A2_C2_':{roles:['Enforcer','Engineer'],pass:'_A3_C1_',fail:'_A2_C3_'},
+      '_A3_C2_':{role:'Hustler',pass:'_A4_C1_',fail:'_B4_C1_'},
+      '_A1_C2_':{role:'Enforcer',pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_B4_C2_':{roles:['Enforcer','Hustler'],pass:'_B5_C1_',fail:'_B4F_'},
+      '_A2_C3_':{roles:['Enforcer','Engineer'],pass:'_A3_C1_',fail:'_A2F_'},
+      '_A1_C3_':{roles:['Enforcer','Engineer'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_A8S_':{end:true,payout:0.8814},'_A7S_':{end:true,payout:1.0},
+      '_B6S_':{end:true,payout:0.6069},'_A9S_':{end:true,payout:0.7363},
+      '_A6F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
+      '_B4F_':{end:true,payout:0},'_A5F_':{end:true,payout:0},'_B5F_':{end:true,payout:0},
     }
   },
   'Clinical Precision': {
@@ -598,17 +798,31 @@ const FLOWCHARTS = {
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Cat Burglar',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Assassin',pass:'_A3_C1_',fail:'_A2_C2_'},
-      '_A3_C1_':{role:'Assassin',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C1_':{role:'Cleaner',pass:'_A4_C1_',fail:'_A3_C2_'},
       '_A4_C1_':{role:'Cleaner',pass:'_A5_C1_',fail:'_A4_C2_'},
-      '_A5_C1_':{role:'Assassin',pass:'_A5S_',fail:'_A5_C2_'},
-      '_A5_C2_':{role:'Imitator',pass:'_A5S2_',fail:'_A5F_'},
-      '_A4_C2_':{role:'Imitator',pass:'_A5_C1_',fail:'_A4F_'},
-      '_A3_C2_':{role:'Cleaner',pass:'_A4_C1_',fail:'_A3F_'},
-      '_A2_C2_':{role:'Assassin',pass:'_A3_C1_',fail:'_A2F_'},
-      '_A1_C2_':{role:'Assassin',pass:'_A2_C1_',fail:'_A1F_'},
-      '_A5S_':{end:true,payout:1.0},'_A5S2_':{end:true,payout:0.75},
-      '_A5F_':{end:true,payout:0},'_A4F_':{end:true,payout:0},
-      '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
+      '_A5_C1_':{roles:['Assassin','Imitator'],pass:'_A6_C1_',fail:'_C5_C1_'},
+      '_A6_C1_':{role:'Assassin',pass:'_A7_C1_',fail:'_A6_C2_'},
+      '_A7_C1_':{roles:['Assassin','Cleaner'],pass:'_A8S_',fail:'_A9S_'},
+      '_A1_C2_':{roles:['Cat Burglar','Assassin'],pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A1_C3_':{roles:['Cat Burglar','Cleaner'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_A4_C2_':{role:'Cat Burglar',pass:'_A5_C1_',fail:'_A4F_'},
+      '_A2_C2_':{role:'Assassin',pass:'_A3_C1_',fail:'_B3_C1_'},
+      '_B3_C1_':{role:'Imitator',pass:'_B4_C1_',fail:'_B3_C2_'},
+      '_B3_C2_':{roles:['Assassin','Cleaner'],pass:'_B4_C1_',fail:'_B3F_'},
+      '_B4_C1_':{role:'Imitator',pass:'_B5_C1_',fail:'_B4F_'},
+      '_B5_C1_':{roles:['Assassin','Cleaner'],pass:'_B6S_',fail:'_B5S_'},
+      '_C5_C1_':{role:'Cleaner',pass:'_C6_C1_',fail:'_C5_C2_'},
+      '_C6_C1_':{role:'Imitator',pass:'_C7S_',fail:'_C6F_'},
+      '_A3_C2_':{role:'Cleaner',pass:'_A4_C1_',fail:'_B3_C1_'},
+      '_C5_C2_':{roles:['Cat Burglar','Cleaner'],pass:'_C6_C1_',fail:'_C5F_'},
+      '_A6_C2_':{role:'Assassin',pass:'_A7_C1_',fail:'_A6_C3_'},
+      '_A6_C3_':{role:'Imitator',pass:'_A6S_',fail:'_A6F_'},
+      '_A8S_':{end:true,payout:1.0},'_A9S_':{end:true,payout:0.9113},
+      '_C7S_':{end:true,payout:0.7614},'_A6S_':{end:true,payout:0.7876},
+      '_B6S_':{end:true,payout:0.6916},'_B5S_':{end:true,payout:0.5675},
+      '_B3F_':{end:true,payout:0},'_C6F_':{end:true,payout:0},
+      '_A4F_':{end:true,payout:0},'_B4F_':{end:true,payout:0},
+      '_C5F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
     }
   },
   'Sneaky Git Grab': {
@@ -654,8 +868,8 @@ const FLOWCHARTS = {
       '_A4_C1_':{role:'Enforcer',pass:'_A5_C1_',fail:'_B2_C1_'},
       '_A5_C1_':{roles:['Lookout','Sniper'],pass:'_A6S_',fail:'_A7S_'},
       '_B2_C2_':{roles:['Sniper','Driver'],pass:'_B2S_',fail:'_B2F_'},
-      '_A6S_':{end:true,payout:1.0},'_B4S_':{end:true,payout:0.7},'_A7S_':{end:true,payout:0.85},
-      '_B2S_':{end:true,payout:0.6},'_B3F_':{end:true,payout:0},'_B2F_':{end:true,payout:0},
+      '_A6S_':{end:true,payout:1.0},'_B4S_':{end:true,payout:1.0},'_A7S_':{end:true,payout:1.0},
+      '_B2S_':{end:true,payout:1.0},'_B3F_':{end:true,payout:0},'_B2F_':{end:true,payout:0},
       '_B1F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
     }
   },
@@ -702,8 +916,8 @@ const FLOWCHARTS = {
       '_B7_C1_':{role:'Imitator 2',pass:'_B7S_',fail:'_B7S2_'},
       '_B8_C1_':{role:'Looter 3',pass:'_B9S_',fail:'_B8F_'},
       '_A1_C3_':{roles:['Imitator 1','Looter 1'],pass:'_A2_C1_',fail:'_A1F_'},
-      '_A7S_':{end:true,payout:1.0},'_B7S_':{end:true,payout:0.8},'_B7S2_':{end:true,payout:0.7},
-      '_A7S2_':{end:true,payout:0.85},'_B9S_':{end:true,payout:0.6},'_B8F_':{end:true,payout:0},
+      '_A7S_':{end:true,payout:1.0},'_B7S_':{end:true,payout:1.0},'_B7S2_':{end:true,payout:1.0},
+      '_A7S2_':{end:true,payout:1.0},'_B9S_':{end:true,payout:1.0},'_B8F_':{end:true,payout:0},
       '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
     }
   },
@@ -729,8 +943,8 @@ const FLOWCHARTS = {
       '_B2_C1_':{role:'Hustler 1',pass:'_B3_C1_',fail:'_B2_C2_'},
       '_B3_C1_':{role:'Imitator',pass:'_B3S_',fail:'_B3S2_'},
       '_B2_C2_':{role:'Hustler 2',pass:'_B3_C1_',fail:'_B2F_'},
-      '_A8S_':{end:true,payout:0.9},'_A7S_':{end:true,payout:1.0},'_B3S2_':{end:true,payout:0.6},
-      '_B3S_':{end:true,payout:0.7},'_A9S_':{end:true,payout:0.8},'_B2F_':{end:true,payout:0},
+      '_A8S_':{end:true,payout:1.0},'_A7S_':{end:true,payout:1.0},'_B3S2_':{end:true,payout:1.0},
+      '_B3S_':{end:true,payout:1.0},'_A9S_':{end:true,payout:1.0},'_B2F_':{end:true,payout:0},
       '_A4F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
       '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_C1F_':{end:true,payout:0},
     }
@@ -755,8 +969,8 @@ const FLOWCHARTS = {
       '_A6_C1_':{role:'Imitator',pass:'_A7S_',fail:'_A6S_'},
       '_B3_C2_':{role:'Hacker',pass:'_B4S_',fail:'_B3F_'},
       '_A7S_':{end:true,payout:1.0},'_B3F_':{end:true,payout:0},'_B2F_':{end:true,payout:0},
-      '_B5S_':{end:true,payout:0.8},'_A5F_':{end:true,payout:0},'_A6S_':{end:true,payout:0.85},
-      '_B1F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_B4S_':{end:true,payout:0.7},
+      '_B5S_':{end:true,payout:1.0},'_A5F_':{end:true,payout:0},'_A6S_':{end:true,payout:1.0},
+      '_B1F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_B4S_':{end:true,payout:1.0},
     }
   },
   'Best of the Lot': {
@@ -778,10 +992,10 @@ const FLOWCHARTS = {
       '_A5_C1_':{role:'Muscle',pass:'_A6S_',fail:'_A5_C2_'},
       '_A5_C2_':{role:'Imitator',pass:'_A7S_',fail:'_A8S_'},
       '_A1_C3_':{roles:['Car Thief','Muscle','Thief'],pass:'_A1F2_',fail:'_A1F1_'},
-      '_B2S_':{end:true,payout:0.85},'_B3S_':{end:true,payout:0.75},'_A8S_':{end:true,payout:0.7},
-      '_A7S_':{end:true,payout:0.9},'_A6S_':{end:true,payout:1.0},'_A4F_':{end:true,payout:0},
-      '_A1F1_':{end:true,payout:0},'_A3F_':{end:true,payout:0},'_B1F_':{end:true,payout:0},
-      '_A2F_':{end:true,payout:0},'_A1F2_':{end:true,payout:0},
+      '_B2S_':{end:true,payout:1.0},'_B3S_':{end:true,payout:1.0},'_A8S_':{end:true,payout:1.0},
+      '_A7S_':{end:true,payout:1.0},'_A6S_':{end:true,payout:1.0},'_A4F_':{end:true,payout:0},
+      '_A1F1_':{end:true,payout:1.0},'_A3F_':{end:true,payout:0},'_B1F_':{end:true,payout:0},
+      '_A2F_':{end:true,payout:0},'_A1F2_':{end:true,payout:1.0},
     }
   },
   'Pet Project': {
@@ -883,8 +1097,8 @@ const FLOWCHARTS = {
       '_B6_C1_':{roles:['Lookout','Sniper'],pass:'_B7_C1_',fail:'_B6_C2_'},
       '_B6_C2_':{role:'Lookout',pass:'_B7_C1_',fail:'_B6F_'},
       '_A7_C3_':{roles:['Engineer','Muscle 1','Muscle 2'],pass:'_A8S3_',fail:'_A7F_'},
-      '_A8S_':{end:true,payout:1.0},'_A8S2_':{end:true,payout:0.9},'_B7S_':{end:true,payout:0.75},
-      '_A8S3_':{end:true,payout:0.8},'_B7S2_':{end:true,payout:0.65},'_A7F_':{end:true,payout:0},
+      '_A8S_':{end:true,payout:1.0},'_A8S2_':{end:true,payout:1.0},'_B7S_':{end:true,payout:1.0},
+      '_A8S3_':{end:true,payout:1.0},'_B7S2_':{end:true,payout:1.0},'_A7F_':{end:true,payout:0},
       '_A4F_':{end:true,payout:0},'_B7F_':{end:true,payout:0},'_B6F_':{end:true,payout:0},
       '_A3F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
       '_B5F_':{end:true,payout:0},
@@ -911,9 +1125,9 @@ const FLOWCHARTS = {
       '_A1_C3_':{role:'Hijacker',pass:'_A2_C1_',fail:'_A1C3F_'},
       '_A6_C3_':{roles:['Pickpocket','Bomber'],pass:'_A7_C1_',fail:'_A6F_'},
       '_A3_C3_':{role:'Engineer',pass:'_A4_C1_',fail:'_A3F_'},
-      '_A8S_':{end:true,payout:1.0},'_A8S2_':{end:true,payout:0.85},'_A1C3F_':{end:true,payout:0},
+      '_A8S_':{end:true,payout:1.0},'_A8S2_':{end:true,payout:1.0},'_A1C3F_':{end:true,payout:0},
       '_A5F_':{end:true,payout:0},'_A4F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},
-      '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A8S3_':{end:true,payout:0.7},
+      '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A8S3_':{end:true,payout:1.0},
     }
   },
   'Manifest Cruelty': {
@@ -941,23 +1155,36 @@ const FLOWCHARTS = {
       '_B5_C2_':{role:'Reviver',pass:'_B6_C1_',fail:'_B5F_'},
       '_B6_C2_':{roles:['Cat Burglar','Hacker'],pass:'_B7S_',fail:'_B6F_'},
       '_A6_C3_':{roles:['Cat Burglar','Hacker'],pass:'_A7_C1_',fail:'_A6F_'},
-      '_A8S_':{end:true,payout:1.0},'_A7S_':{end:true,payout:0.9},'_A7F_':{end:true,payout:0},
+      '_A8S_':{end:true,payout:1.0},'_A7S_':{end:true,payout:1.0},'_A7F_':{end:true,payout:0},
       '_A5F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},'_B4F_':{end:true,payout:0},
       '_B6F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
-      '_B7S_':{end:true,payout:0.75},'_B5F_':{end:true,payout:0},
+      '_B7S_':{end:true,payout:1.0},'_B5F_':{end:true,payout:0},
     }
   },
   'Cash Me If You Can': {
     level: 2,
     start:'_A1_C1_', nodes:{
-      '_A1_C1_':{role:'Lookout',pass:'_A2_C1_',fail:'_A1_C2_'},
-      '_A2_C1_':{role:'Thief 1',pass:'_A3_C1_',fail:'_A2_C2_'},
-      '_A3_C1_':{role:'Thief 2',pass:'_A3S_',fail:'_A3_C2_'},
-      '_A3_C2_':{role:'Thief 1',pass:'_A3S_',fail:'_A3F_'},
-      '_A1_C2_':{role:'Thief 1',pass:'_A2_C1_',fail:'_A1F_'},
-      '_A2_C2_':{role:'Thief 2',pass:'_A3_C1_',fail:'_A2F_'},
-      '_A3S_':{end:true,payout:1.0},
-      '_A3F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+      '_A1_C1_':{role:'Thief 1',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A1_C2_':{role:'Thief 1',pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A2_C1_':{role:'Thief 2',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A2_C2_':{role:'Thief 1',pass:'_A3_C1_',fail:'_A2_C3_'},
+      '_A3_C1_':{role:'Thief 1',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A4_C1_':{role:'Thief 2',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A5_C1_':{role:'Lookout',pass:'_A6_C1_',fail:'_B1_C1_'},
+      '_B1_C1_':{role:'Thief 1',pass:'_B2_C1_',fail:'_B1F_'},
+      '_B2_C1_':{role:'Lookout',pass:'_B3S_',fail:'_B2F_'},
+      '_A4_C2_':{role:'Thief 1',pass:'_A4S_',fail:'_B1_C1_'},
+      '_A3_C2_':{role:'Thief 1',pass:'_A4_C1_',fail:'_A3_C3_'},
+      '_A2_C3_':{role:'Thief 2',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A1_C3_':{roles:['Thief 2','Thief 1'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_A3_C3_':{role:'Thief 2',pass:'_C1_C1_',fail:'_B1F_'},
+      '_C1_C1_':{role:'Thief 1',pass:'_C2S_',fail:'_C1F_'},
+      '_A6_C1_':{role:'Thief 2',pass:'_A7S_',fail:'_A8S_'},
+      '_B3S_':{end:true,payout:0.751},'_A4S_':{end:true,payout:0.8739},
+      '_A8S_':{end:true,payout:0.8977},'_A7S_':{end:true,payout:1.0},
+      '_C2S_':{end:true,payout:0.5534},
+      '_B2F_':{end:true,payout:0},'_B1F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_C1F_':{end:true,payout:0},
     }
   },
   'First Aid and Abet': {
@@ -1028,7 +1255,7 @@ const FLOWCHARTS = {
       '_A4_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_A5_C1_',fail:'_A4F_'},
       '_A5_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A5S_',fail:'_A5_C2_'},
       '_A5_C2_':{role:'Engineer',pass:'_A5S2_',fail:'_A5F_'},
-      '_A5S_':{end:true,payout:1.0},'_A5S2_':{end:true,payout:0.8},
+      '_A5S_':{end:true,payout:1.0},'_A5S2_':{end:true,payout:1.0},
       '_A4F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
       '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A5F_':{end:true,payout:0},
     }
@@ -1076,6 +1303,41 @@ function computeRoleColors() {
   });
   console.log('[SERVER] Role colours computed for', Object.keys(ROLE_COLORS).length, 'OCs');
 }
+
+
+// ── OC METADATA ───────────────────────────────────────────────────────────────
+// rewardType: 'cash' | 'items' | 'chain' (chain = unlocks next OC, no direct reward)
+// maxPayout: max cash value (0 for items/chain OCs)
+// itemDesc: short description for items-only OCs
+const OC_METADATA = {
+  'First Aid and Abet':       { rewardType:'items', maxPayout:0,          itemDesc:'Medical items + respect' },
+  'Mob Mentality':            { rewardType:'cash',  maxPayout:1500000,    itemDesc:'' },
+  'Pet Project':              { rewardType:'cash',  maxPayout:806000,     itemDesc:'' },
+  'Cash Me If You Can':       { rewardType:'cash',  maxPayout:1601000,    itemDesc:'' },
+  'Best of the Lot':          { rewardType:'items', maxPayout:0,          itemDesc:'Luxury car + respect' },
+  'Smoke and Wing Mirrors':   { rewardType:'items', maxPayout:0,          itemDesc:'Luxury car + respect' },
+  'Market Forces':            { rewardType:'cash',  maxPayout:8575000,    itemDesc:'' },
+  'Gaslight the Way':         { rewardType:'items', maxPayout:0,          itemDesc:'Alcohol/energy drinks + respect' },
+  'Snow Blind':               { rewardType:'cash',  maxPayout:10565000,   itemDesc:'' },
+  'Plucking the Lotus Petal': { rewardType:'cash',  maxPayout:8976000,    itemDesc:'' },
+  'Stage Fright':             { rewardType:'items', maxPayout:0,          itemDesc:'~30 Xanax + respect' },
+  'Guardian Angels':          { rewardType:'cash',  maxPayout:8883000,    itemDesc:'' },
+  'Counter Offer':            { rewardType:'items', maxPayout:0,          itemDesc:'Grey weapons (~$24M sell value) + respect' },
+  'No Reserve':               { rewardType:'chain', maxPayout:0,          itemDesc:'Unlocks Bidding War' },
+  'Honey Trap':               { rewardType:'cash',  maxPayout:25671000,   itemDesc:'' },
+  'Bidding War':              { rewardType:'cash',  maxPayout:133980000,  itemDesc:'' },
+  'Leave No Trace':           { rewardType:'cash',  maxPayout:13474000,   itemDesc:'' },
+  'Sneaky Git Grab':          { rewardType:'cash',  maxPayout:38757000,   itemDesc:'' },
+  'Blast from the Past':      { rewardType:'cash',  maxPayout:202382000,  itemDesc:'' },
+  'Window of Opportunity':    { rewardType:'items', maxPayout:0,          itemDesc:'Rare art/weapons + respect' },
+  'Break the Bank':           { rewardType:'cash',  maxPayout:395980000,  itemDesc:'' },
+  'Clinical Precision':       { rewardType:'cash',  maxPayout:122565000,  itemDesc:'' },
+  'Stacking the Deck':        { rewardType:'chain', maxPayout:0,          itemDesc:'Unlocks Ace in the Hole' },
+  'Manifest Cruelty':         { rewardType:'chain', maxPayout:0,          itemDesc:'Unlocks Gone Fission' },
+  'Ace in the Hole':          { rewardType:'cash',  maxPayout:579919000,  itemDesc:'' },
+  'Gone Fission':             { rewardType:'chain', maxPayout:0,          itemDesc:'Unlocks Crane Reaction' },
+  'Crane Reaction':           { rewardType:'items', maxPayout:0,          itemDesc:'Cesium-137 + 2001 respect' },
+};
 
 // ── SIMULATION ────────────────────────────────────────────────────────────────
 const BASELINE = 68;
@@ -1238,6 +1500,24 @@ function hashObject(obj) {
 
 // Core optimization function
 async function optimizeFaction(factionId, ocs, requestingMember) {
+  // Load empirical payout model for this faction
+  let _empiricalModel = {};
+  try {
+    const empResult = await query(
+      `SELECT oc_name, AVG(max_money)::BIGINT AS mean_payout, COUNT(*) AS samples
+       FROM oc_payouts WHERE faction_id=$1 AND max_money > 0
+       GROUP BY oc_name`,
+      [factionId]
+    );
+    empResult.rows.forEach(r => {
+      _empiricalModel[r.oc_name] = { meanPayout: parseInt(r.mean_payout), samples: parseInt(r.samples) };
+    });
+    if(Object.keys(_empiricalModel).length > 0)
+      console.log('[OPTIMIZE] Empirical payout model loaded for', Object.keys(_empiricalModel).length, 'OCs');
+  } catch(e) {
+    console.warn('[OPTIMIZE] Could not load empirical model:', e.message);
+  }
+
 
   // ── Step 1: Load all faction CPR from DB ──────────────────────────────────
   let memberCPRRows = [];
@@ -1419,6 +1699,13 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     const projected  = simulateOC(oc.ocName, assembledCPRs);
     const projectedSC = projected?.successChance || 0;
     const baselineSC  = baseline?.successChance  || 0;
+    // Scale expected value by actual reward for cross-OC ranking
+    const _meta      = OC_METADATA[oc.ocName] || { rewardType:'cash', maxPayout:0 };
+    const _empData   = _empiricalModel?.[oc.ocName];
+    const _empPayout = _empData?.samples >= 5 ? _empData.meanPayout : 0;
+    const _thPayout  = _meta.rewardType === 'cash' ? (_meta.maxPayout || 1) : (FLOWCHARTS[oc.ocName]?.level||1)*1000000;
+    const _basis     = _empPayout > 0 ? _empPayout : _thPayout;
+    const projectedEV = (projected?.expectedValue || 0) * _basis;
 
     // Determine status
     let status = 'optimal';
@@ -1432,6 +1719,10 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     optimizedOCs.push({
       ocName:           oc.ocName,
       level:            ocLevel,
+      rewardType:       OC_METADATA[oc.ocName]?.rewardType || 'cash',
+      itemDesc:         OC_METADATA[oc.ocName]?.itemDesc   || '',
+      empiricalPayout:  _empiricalModel?.[oc.ocName]?.meanPayout  || null,
+      empiricalSamples: _empiricalModel?.[oc.ocName]?.samples     || 0,
       projectedSuccess: projectedSC,
       currentSuccess:   baselineSC,
       improvement:      projectedSC - baselineSC,
@@ -1610,7 +1901,7 @@ setInterval(async () => {
 app.get('/', (req, res) => {
   res.json({
     status:  'ok',
-    version: '2.3.0',
+    version: '2.6.0',
     ocs:     Object.keys(FLOWCHARTS).length,
   });
 });
@@ -1653,7 +1944,15 @@ app.post('/api/score/batch', rateLimit('score_batch'), async (req, res) => {
 app.get('/api/ocs', async (req, res) => {
   const owner = await validateKey(req, res);
   if(!owner) return;
-  res.json({ ocs: Object.keys(FLOWCHARTS) });
+  // Return OC names with metadata for the advisor UI
+  const ocs = Object.keys(FLOWCHARTS).map(name => ({
+    name,
+    level:      FLOWCHARTS[name].level,
+    rewardType: OC_METADATA[name]?.rewardType || 'cash',
+    maxPayout:  OC_METADATA[name]?.maxPayout  || 0,
+    itemDesc:   OC_METADATA[name]?.itemDesc   || '',
+  }));
+  res.json({ ocs });
 });
 
 // ── Store member CPR (personal push from member script) ───────────────────────
@@ -1710,7 +2009,13 @@ app.post('/api/cpr/batch', rateLimit('cpr_batch'), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    let skipped = 0;
     for(const [memberName, cprs] of entries) {
+      // Skip numeric-only names (Torn IDs, not real names)
+      if(!memberName || /^\d+$/.test(memberName.trim()) || memberName.trim().length < 2) {
+        skipped++;
+        continue;
+      }
       await client.query(
         `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
          VALUES ($1, $2, 'tornstats', $3, NOW())
@@ -1732,7 +2037,7 @@ app.post('/api/cpr/batch', rateLimit('cpr_batch'), async (req, res) => {
     }
     await client.query('COMMIT');
     await invalidateCache(factionId);
-    res.json({ ok: true, updated, skipped: skipped || 0, factionId });
+    res.json({ ok: true, updated, skipped, factionId });
   } catch(e) {
     await client.query('ROLLBACK');
     console.error('[CPR BATCH] Error:', e.message);
@@ -2007,11 +2312,56 @@ app.post('/api/cpr/cleanup', async (req, res) => {
   }
 });
 
-// ── GET /api/roles — role colour classifications for all OCs ─────────────────
+// ── GET /api/roles — role colour classifications + checkpoint context ─────────
 app.get('/api/roles', async (req, res) => {
   const owner = await validateKey(req, res);
   if(!owner) return;
-  res.json({ roles: ROLE_COLORS });
+
+  // Build checkpoint context for each role in each OC
+  // This powers the hover tooltips on the advisor page
+  const roleContext = {};
+  Object.entries(FLOWCHARTS).forEach(([ocName, oc]) => {
+    roleContext[ocName] = {};
+    const nodes = oc.nodes;
+
+    // For each role, find its checkpoints and describe what happens on fail
+    const roleInfo = {};
+    Object.entries(nodes).forEach(([nodeId, node]) => {
+      if(node.end) return;
+      const roles = node.roles || (node.role ? [node.role] : []);
+      roles.forEach(role => {
+        if(!roleInfo[role]) roleInfo[role] = { checkpoints: 0, deadEnds: 0, recoveries: 0, isStart: false };
+        roleInfo[role].checkpoints++;
+        if(nodeId === oc.start) roleInfo[role].isStart = true;
+        const failNode = nodes[node.fail];
+        if(failNode?.end && failNode?.payout === 0) roleInfo[role].deadEnds++;
+        else roleInfo[role].recoveries++;
+      });
+    });
+
+    Object.entries(roleInfo).forEach(([role, info]) => {
+      const color = ROLE_COLORS[ocName]?.[role] || 'yellow';
+      let desc = '';
+      if(color === 'red') {
+        desc = 'Critical — failure always ends the OC';
+      } else if(info.deadEnds > 0 && info.recoveries > 0) {
+        desc = `Mixed — ${info.deadEnds} dead-end${info.deadEnds>1?'s':''}, ${info.recoveries} recovery path${info.recoveries>1?'s':''}`;
+      } else {
+        desc = 'Safe — failure never kills the OC';
+      }
+      if(info.isStart) desc = '⚡ Gate role. ' + desc;
+      roleContext[ocName][role] = {
+        color,
+        checkpoints: info.checkpoints,
+        deadEnds:    info.deadEnds,
+        recoveries:  info.recoveries,
+        isStart:     info.isStart,
+        desc,
+      };
+    });
+  });
+
+  res.json({ roles: ROLE_COLORS, context: roleContext });
 });
 
 // ── POST /api/cpr/history — push CPR data extracted from completed OC history ─
@@ -2110,6 +2460,106 @@ app.get('/api/cpr/status', async (req, res) => {
   }
 });
 
+
+// ── POST /api/payout/record — store completed OC payout data ─────────────────
+// Body: { records: [{ ocName, executedAt, money, respect, itemIds, slotCPRs, payoutPct }] }
+app.post('/api/payout/record', rateLimit('cpr_history'), async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+  if(!isLeaderKey(key)) return res.status(403).json({ error: 'Leader key required' });
+
+  const { records } = req.body;
+  if(!Array.isArray(records) || records.length === 0)
+    return res.status(400).json({ error: 'records must be a non-empty array' });
+  if(records.length > 200)
+    return res.status(400).json({ error: 'Max 200 records per push' });
+
+  const factionId = getFactionId(key);
+  let inserted = 0;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for(const r of records) {
+      const { ocName, executedAt, money, respect, itemIds, slotCPRs, payoutPct } = r;
+      if(!ocName || !executedAt) continue;
+      // Normalise to 100% payout so we can compare across different split percentages
+      const pct = payoutPct > 0 ? payoutPct : 100;
+      const maxMoney = pct < 100 ? Math.round((money || 0) / pct * 100) : (money || 0);
+
+      // Avoid duplicate records for same OC execution
+      const exists = await client.query(
+        'SELECT 1 FROM oc_payouts WHERE faction_id=$1 AND oc_name=$2 AND executed_at=$3',
+        [factionId, ocName, executedAt]
+      );
+      if(exists.rows.length > 0) continue;
+
+      await client.query(
+        `INSERT INTO oc_payouts
+           (faction_id, oc_name, executed_at, money, respect, item_ids, slot_cprs, payout_pct, max_money)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [factionId, ocName, executedAt, money||0, respect||0,
+         JSON.stringify(itemIds||[]), JSON.stringify(slotCPRs||{}), pct, maxMoney]
+      );
+      inserted++;
+    }
+    await client.query('COMMIT');
+    console.log('[PAYOUT] Inserted', inserted, 'records for faction', factionId);
+    res.json({ ok: true, inserted, total: records.length });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    console.error('[PAYOUT] Error:', e.message);
+    res.status(500).json({ error: 'Failed to store payout records' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── GET /api/payout/model — empirical payout model per OC ────────────────────
+app.get('/api/payout/model', async (req, res) => {
+  const key   = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res);
+  if(!owner) return;
+
+  const factionId = getFactionId(key);
+  try {
+    const result = await query(
+      `SELECT oc_name,
+              COUNT(*)                        AS samples,
+              AVG(max_money)::BIGINT          AS mean_payout,
+              PERCENTILE_CONT(0.5)
+                WITHIN GROUP (ORDER BY max_money)::BIGINT AS median_payout,
+              MAX(max_money)::BIGINT          AS max_observed,
+              MIN(max_money)::BIGINT          AS min_observed,
+              AVG(respect)                    AS mean_respect,
+              MAX(executed_at)                AS last_seen
+       FROM oc_payouts
+       WHERE faction_id = $1 AND max_money >= 0
+       GROUP BY oc_name
+       ORDER BY mean_payout DESC`,
+      [factionId]
+    );
+
+    const model = {};
+    result.rows.forEach(row => {
+      model[row.oc_name] = {
+        samples:      parseInt(row.samples),
+        meanPayout:   parseInt(row.mean_payout),
+        medianPayout: parseInt(row.median_payout),
+        maxObserved:  parseInt(row.max_observed),
+        minObserved:  parseInt(row.min_observed),
+        meanRespect:  parseFloat(parseFloat(row.mean_respect).toFixed(1)),
+        lastSeen:     parseInt(row.last_seen),
+      };
+    });
+
+    res.json({ model, factionId });
+  } catch(e) {
+    console.error('[PAYOUT MODEL] Error:', e.message);
+    res.status(500).json({ error: 'Failed to load payout model' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════════════════
@@ -2117,7 +2567,7 @@ app.get('/api/cpr/status', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, () => {
-    console.log(`[SERVER] Hive OC Advisor v2.3.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v2.6.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 });
