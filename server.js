@@ -1575,7 +1575,7 @@ setInterval(async () => {
 app.get('/', (req, res) => {
   res.json({
     status:  'ok',
-    version: '2.1.0',
+    version: '2.2.0',
     ocs:     Object.keys(FLOWCHARTS).length,
   });
 });
