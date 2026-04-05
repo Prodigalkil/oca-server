@@ -386,7 +386,7 @@ function getRoleCPRRange(role) {
 
 const FLOWCHARTS = {
   'Bidding War': {
-    level: 8,
+    level: 6,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Bomber 1',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A1_C2_':{roles:['Bomber 1','Bomber 2'],pass:'_A2_C1_',fail:'_A1_C3_'},
@@ -413,7 +413,7 @@ const FLOWCHARTS = {
     }
   },
   'No Reserve': {
-    level: 6,
+    level: 5,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Techie',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Techie',pass:'_A3_C1_',fail:'_A2_C2_'},
@@ -441,7 +441,7 @@ const FLOWCHARTS = {
     }
   },
   'Blast from the Past': {
-    level: 8,
+    level: 7,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Muscle',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A1_C2_':{roles:['Picklock 1','Picklock 2'],pass:'_A2_C1_',fail:'_A1_C3_'},
@@ -470,7 +470,7 @@ const FLOWCHARTS = {
     }
   },
   'Break the Bank': {
-    level: 9,
+    level: 8,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{roles:['Robber','Muscle 1'],pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{roles:['Muscle 2','Thief 1'],pass:'_A3_C1_',fail:'_A2_C2_'},
@@ -498,7 +498,7 @@ const FLOWCHARTS = {
     }
   },
   'Snow Blind': {
-    level: 5,
+    level: 4,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A1_C2_':{role:'Muscle 1',pass:'_A2_C1_',fail:'_A1_C3_'},
@@ -577,7 +577,7 @@ const FLOWCHARTS = {
       '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
     }
   },
-  'Guardian Angel': {
+  'Guardian Angels': {
     level: 5,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Hustler',pass:'_A2_C1_',fail:'_A1_C2_'},
@@ -594,7 +594,7 @@ const FLOWCHARTS = {
     }
   },
   'Clinical Precision': {
-    level: 7,
+    level: 8,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Cat Burglar',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Assassin',pass:'_A3_C1_',fail:'_A2_C2_'},
@@ -708,7 +708,7 @@ const FLOWCHARTS = {
     }
   },
   'Smoke and Wing Mirrors': {
-    level: 5,
+    level: 3,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Imitator',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A1_C2_':{roles:['Car Thief','Thief'],pass:'_A2_C1_',fail:'_A1_C3_'},
@@ -736,7 +736,7 @@ const FLOWCHARTS = {
     }
   },
   'Stacking the Deck': {
-    level: 6,
+    level: 8,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Cat Burglar',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Driver',pass:'_A3_C1_',fail:'_A2_C2_'},
@@ -814,7 +814,7 @@ const FLOWCHARTS = {
     }
   },
   'Ace in the Hole': {
-    level: 7,
+    level: 9,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Imitator',pass:'_A2_C1_',fail:'_B2_C1_'},
       '_A2_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A3_C1_',fail:'_A2_C2_'},
@@ -858,7 +858,7 @@ const FLOWCHARTS = {
     }
   },
   'Crane Reaction': {
-    level: 7,
+    level: 10,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A1_C2_':{roles:['Sniper','Muscle 2'],pass:'_A2_C1_',fail:'_A1_C3_'},
@@ -891,7 +891,7 @@ const FLOWCHARTS = {
     }
   },
   'Gone Fission': {
-    level: 6,
+    level: 9,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Hijacker',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Hijacker',pass:'_A3_C1_',fail:'_A2_C2_'},
@@ -917,7 +917,7 @@ const FLOWCHARTS = {
     }
   },
   'Manifest Cruelty': {
-    level: 9,
+    level: 8,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{roles:['Cat Burglar','Interrogator'],pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Interrogator',pass:'_A3_C1_',fail:'_A2_C2_'},
@@ -947,7 +947,7 @@ const FLOWCHARTS = {
       '_B7S_':{end:true,payout:0.75},'_B5F_':{end:true,payout:0},
     }
   },
-  'Cash Me if You Can': {
+  'Cash Me If You Can': {
     level: 2,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Lookout',pass:'_A2_C1_',fail:'_A1_C2_'},
@@ -999,6 +999,41 @@ const FLOWCHARTS = {
       '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_B5F_':{end:true,payout:0},
     }
   },
+  'Plucking the Lotus Petal': {
+    level: 4,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Muscle',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A1_C2_':{role:'Hustler',pass:'_A2_C1_',fail:'_A1F_'},
+      '_A2_C1_':{role:'Hustler',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A2_C2_':{role:'Muscle',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3_C1_':{role:'Robber',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Robber',pass:'_A4_C1_',fail:'_A3F_'},
+      '_A4_C1_':{role:'Robber',pass:'_A5S_',fail:'_A4_C2_'},
+      '_A4_C2_':{role:'Hustler',pass:'_A5S2_',fail:'_A4F_'},
+      '_A5S_':{end:true,payout:1.0},'_A5S2_':{end:true,payout:0.75},
+      '_A4F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+    }
+  },
+  'Window of Opportunity': {
+    level: 7,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Engineer',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A1_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_A2_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A2_C2_':{role:'Engineer',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3_C1_':{role:'Looter 1',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Looter 2',pass:'_A4_C1_',fail:'_A3F_'},
+      '_A4_C1_':{role:'Looter 2',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_A5_C1_',fail:'_A4F_'},
+      '_A5_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A5S_',fail:'_A5_C2_'},
+      '_A5_C2_':{role:'Engineer',pass:'_A5S2_',fail:'_A5F_'},
+      '_A5S_':{end:true,payout:1.0},'_A5S2_':{end:true,payout:0.8},
+      '_A4F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A5F_':{end:true,payout:0},
+    }
+  },
+
 };
 
 
@@ -1575,7 +1610,7 @@ setInterval(async () => {
 app.get('/', (req, res) => {
   res.json({
     status:  'ok',
-    version: '2.2.0',
+    version: '2.3.0',
     ocs:     Object.keys(FLOWCHARTS).length,
   });
 });
@@ -2082,7 +2117,7 @@ app.get('/api/cpr/status', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, () => {
-    console.log(`[SERVER] Hive OC Advisor v2.2.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v2.3.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 });
