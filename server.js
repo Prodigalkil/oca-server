@@ -256,7 +256,7 @@ function getRoleCPRRange(role) {
 
 const FLOWCHARTS = {
   'Bidding War': {
-    level: 7,
+    level: 8,
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Bomber 1',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A1_C2_':{roles:['Bomber 1','Bomber 2'],pass:'_A2_C1_',fail:'_A1_C3_'},
@@ -463,40 +463,6 @@ const FLOWCHARTS = {
       '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
     }
   },
-  'Market Force': {
-    level: 3,
-    start:'_A1_C1_', nodes:{
-      '_A1_C1_':{role:'Lookout',pass:'_A2_C1_',fail:'_A2_C1_'},
-      '_A2_C1_':{role:'Negotiator',pass:'_A3_C1_',fail:'_A2_C2_'},
-      '_A3_C1_':{role:'Arsonist',pass:'_A4_C1_',fail:'_A4_C1_'},
-      '_A4_C1_':{role:'Enforcer',pass:'_A5_C1_',fail:'_A4_C2_'},
-      '_A5_C1_':{role:'Muscle',pass:'_A5S_',fail:'_A5_C2_'},
-      '_A4_C2_':{role:'Muscle',pass:'_A4S_',fail:'_A4F_'},
-      '_A2_C2_':{role:'Enforcer',pass:'_A3_C1_',fail:'_A2F_'},
-      '_A5_C2_':{role:'Negotiator',pass:'_A5S2_',fail:'_A5F_'},
-      '_A5S_':{end:true,payout:1.0},'_A4S_':{end:true,payout:0.6863},
-      '_A5S2_':{end:true,payout:0.549},'_A4F_':{end:true,payout:0},
-      '_A5F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
-    }
-  },
-  'Ace in the Hole': {
-    level: 7,
-    start:'_A1_C1_', nodes:{
-      '_A1_C1_':{role:'Imitator',pass:'_A2_C1_',fail:'_A1_C2_'},
-      '_A2_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A3_C1_',fail:'_A2_C2_'},
-      '_A3_C1_':{role:'Hacker',pass:'_A4_C1_',fail:'_A3_C2_'},
-      '_A4_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A5_C1_',fail:'_A4_C2_'},
-      '_A5_C1_':{role:'Driver',pass:'_A5S_',fail:'_A5_C2_'},
-      '_A5_C2_':{role:'Imitator',pass:'_A5S2_',fail:'_A5F_'},
-      '_A4_C2_':{role:'Hacker',pass:'_A5_C1_',fail:'_A4F_'},
-      '_A3_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_A4_C1_',fail:'_A3F_'},
-      '_A2_C2_':{role:'Hacker',pass:'_A3_C1_',fail:'_A2F_'},
-      '_A1_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_A2_C1_',fail:'_A1F_'},
-      '_A5S_':{end:true,payout:1.0},'_A5S2_':{end:true,payout:0.7692},
-      '_A5F_':{end:true,payout:0},'_A4F_':{end:true,payout:0},
-      '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
-    }
-  },
   'Clinical Precision': {
     level: 7,
     start:'_A1_C1_', nodes:{
@@ -520,103 +486,438 @@ const FLOWCHARTS = {
     start:'_A1_C1_', nodes:{
       '_A1_C1_':{role:'Imitator',pass:'_A2_C1_',fail:'_A1_C2_'},
       '_A2_C1_':{role:'Pickpocket',pass:'_A3_C1_',fail:'_A2_C2_'},
-      '_A3_C1_':{role:'Techie',pass:'_A4_C1_',fail:'_A3_C2_'},
-      '_A4_C1_':{role:'Hacker',pass:'_A5_C1_',fail:'_A4_C2_'},
-      '_A5_C1_':{role:'Imitator',pass:'_A5S_',fail:'_A5_C2_'},
-      '_A5_C2_':{role:'Techie',pass:'_A5S2_',fail:'_A5F_'},
-      '_A4_C2_':{role:'Imitator',pass:'_A5_C1_',fail:'_A4F_'},
-      '_A3_C2_':{role:'Hacker',pass:'_A4_C1_',fail:'_A3F_'},
-      '_A2_C2_':{role:'Techie',pass:'_A3_C1_',fail:'_A2F_'},
-      '_A1_C2_':{role:'Pickpocket',pass:'_A2_C1_',fail:'_A1F_'},
-      '_A5S_':{end:true,payout:1.0},'_A5S2_':{end:true,payout:0.75},
-      '_A5F_':{end:true,payout:0},'_A4F_':{end:true,payout:0},
-      '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
+      '_A2_C2_':{role:'Pickpocket',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3_C1_':{roles:['Pickpocket','Imitator'],pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A4_C1_':{role:'Techie',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A5_C1_':{role:'Hacker',pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A5_C2_':{role:'Hacker',pass:'_A6_C1_',fail:'_A5_C3_'},
+      '_A6_C1_':{role:'Techie',pass:'_A7_C1_',fail:'_A6_C2_'},
+      '_A7_C1_':{role:'Imitator',pass:'_A7S_',fail:'_A7S2_'},
+      '_A1_C2_':{role:'Imitator',pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A6_C2_':{roles:['Imitator','Techie','Hacker'],pass:'_A8S_',fail:'_A9S_'},
+      '_A4_C2_':{roles:['Pickpocket','Techie'],pass:'_A5_C1_',fail:'_A4F_'},
+      '_A5_C3_':{roles:['Imitator','Hacker'],pass:'_B6_C1_',fail:'_A5F_'},
+      '_B6_C1_':{role:'Hacker',pass:'_B7S_',fail:'_B6F_'},
+      '_A1_C3_':{role:'Pickpocket',pass:'_A2_C1_',fail:'_A1F_'},
+      '_A3_C2_':{role:'Imitator',pass:'_A4_C1_',fail:'_A3_C3_'},
+      '_A3_C3_':{role:'Pickpocket',pass:'_A4_C1_',fail:'_A3F_'},
+      '_A7S_':{end:true,payout:1.0},'_A8S_':{end:true,payout:0.7725},
+      '_A7S2_':{end:true,payout:0.8727},'_A9S_':{end:true,payout:0.6827},
+      '_B7S_':{end:true,payout:0.5948},'_A5F_':{end:true,payout:0},
+      '_A4F_':{end:true,payout:0},'_B6F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+    }
+  },
+  'Stage Fright': {
+    level: 4,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{roles:['Lookout','Muscle 2'],pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Sniper',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A2_C2_':{roles:['Muscle 2','Muscle 1'],pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3_C1_':{roles:['Muscle 1','Muscle 3'],pass:'_A4_C1_',fail:'_B1_C1_'},
+      '_B1_C1_':{role:'Enforcer',pass:'_B2_C1_',fail:'_B1_C2_'},
+      '_B1_C2_':{role:'Sniper',pass:'_B2_C1_',fail:'_B1F_'},
+      '_B2_C1_':{role:'Muscle 1',pass:'_B3_C1_',fail:'_B2_C2_'},
+      '_B3_C1_':{role:'Sniper',pass:'_B4S_',fail:'_B3F_'},
+      '_A1_C2_':{roles:['Lookout','Muscle 1'],pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A1_C3_':{roles:['Enforcer','Muscle 3'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_A4_C1_':{role:'Enforcer',pass:'_A5_C1_',fail:'_B2_C1_'},
+      '_A5_C1_':{roles:['Lookout','Sniper'],pass:'_A6S_',fail:'_A7S_'},
+      '_B2_C2_':{roles:['Sniper','Driver'],pass:'_B2S_',fail:'_B2F_'},
+      '_A6S_':{end:true,payout:1.0},'_B4S_':{end:true,payout:0.7},'_A7S_':{end:true,payout:0.85},
+      '_B2S_':{end:true,payout:0.6},'_B3F_':{end:true,payout:0},'_B2F_':{end:true,payout:0},
+      '_B1F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+    }
+  },
+  'Mob Mentality': {
+    level: 1,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Looter 1',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A1_C2_':{role:'Looter 2',pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A2_C1_':{role:'Looter 2',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Looter 3',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Looter 4',pass:'_A4_C1_',fail:'_A3_C3_'},
+      '_A4_C1_':{role:'Looter 2',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{role:'Looter 1',pass:'_B1_C1_',fail:'_A4F_'},
+      '_B1_C1_':{role:'Looter 4',pass:'_B2S_',fail:'_B3S_'},
+      '_A1_C3_':{role:'Looter 3',pass:'_A2_C1_',fail:'_A1F_'},
+      '_A2_C2_':{role:'Looter 4',pass:'_A3_C1_',fail:'_A2_C3_'},
+      '_A2_C3_':{roles:['Looter 2','Looter 3'],pass:'_A3_C1_',fail:'_A2F_'},
+      '_A5_C1_':{role:'Looter 4',pass:'_A7_C1_',fail:'_A5_C2_'},
+      '_A7_C1_':{role:'Looter 2',pass:'_A7S_',fail:'_A7S2_'},
+      '_A3_C3_':{role:'Looter 1',pass:'_D1_C1_',fail:'_A3_C4_'},
+      '_D1_C1_':{role:'Looter 3',pass:'_D3S_',fail:'_D2F_'},
+      '_A5_C2_':{role:'Looter 1',pass:'_A7S2_',fail:'_A5F_'},
+      '_A3_C4_':{role:'Looter 2',pass:'_D1_C1_',fail:'_D1_C1_'},
+      '_B2S_':{end:true,payout:0.8423},'_A7S2_':{end:true,payout:0.9279},
+      '_A7S_':{end:true,payout:1.0},'_D3S_':{end:true,payout:0.524},
+      '_B3S_':{end:true,payout:0.7518},'_A4F_':{end:true,payout:0},
+      '_D2F_':{end:true,payout:0},'_A5F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+    }
+  },
+  'Gaslight the Way': {
+    level: 3,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{roles:['Imitator 1','Looter 1'],pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Imitator 2',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Imitator 3',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A4_C1_':{role:'Looter 3',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{role:'Looter 3',pass:'_A5_C1_',fail:'_A5_C1_'},
+      '_A5_C1_':{roles:['Looter 2','Looter 3'],pass:'_A7_C1_',fail:'_B7_C1_'},
+      '_A7_C1_':{role:'Imitator 2',pass:'_A7S_',fail:'_A7S2_'},
+      '_A2_C2_':{role:'Imitator 2',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3_C2_':{role:'Imitator 3',pass:'_B8_C1_',fail:'_A3F_'},
+      '_A1_C2_':{roles:['Imitator 1','Looter 1'],pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_B7_C1_':{role:'Imitator 2',pass:'_B7S_',fail:'_B7S2_'},
+      '_B8_C1_':{role:'Looter 3',pass:'_B9S_',fail:'_B8F_'},
+      '_A1_C3_':{roles:['Imitator 1','Looter 1'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_A7S_':{end:true,payout:1.0},'_B7S_':{end:true,payout:0.8},'_B7S2_':{end:true,payout:0.7},
+      '_A7S2_':{end:true,payout:0.85},'_B9S_':{end:true,payout:0.6},'_B8F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
+    }
+  },
+  'Smoke and Wing Mirrors': {
+    level: 5,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Imitator',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A1_C2_':{roles:['Car Thief','Thief'],pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A2_C1_':{role:'Imitator',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{roles:['Car Thief','Thief'],pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A4_C1_':{roles:['Hustler 1','Hustler 2'],pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A5_C1_':{roles:['Car Thief','Thief'],pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A6_C1_':{role:'Hustler 1',pass:'_A7S_',fail:'_A6_C2_'},
+      '_A6_C2_':{roles:['Car Thief','Thief'],pass:'_A8S_',fail:'_A6_C3_'},
+      '_A1_C3_':{role:'Imitator',pass:'_A2_C1_',fail:'_A1F_'},
+      '_A6_C3_':{roles:['Car Thief','Thief'],pass:'_A9S_',fail:'_A6F_'},
+      '_A2_C2_':{role:'Imitator',pass:'_A3_C1_',fail:'_A2_C3_'},
+      '_A2_C3_':{roles:['Car Thief','Thief'],pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3_C2_':{roles:['Car Thief','Thief'],pass:'_A4_C1_',fail:'_A3F_'},
+      '_A4_C2_':{role:'Hustler 2',pass:'_B2_C1_',fail:'_A4_C3_'},
+      '_A4_C3_':{role:'Hustler 2',pass:'_B2_C1_',fail:'_A4F_'},
+      '_A5_C2_':{role:'Imitator',pass:'_B3_C1_',fail:'_C1F_'},
+      '_B2_C1_':{role:'Hustler 1',pass:'_B3_C1_',fail:'_B2_C2_'},
+      '_B3_C1_':{role:'Imitator',pass:'_B3S_',fail:'_B3S2_'},
+      '_B2_C2_':{role:'Hustler 2',pass:'_B3_C1_',fail:'_B2F_'},
+      '_A8S_':{end:true,payout:0.9},'_A7S_':{end:true,payout:1.0},'_B3S2_':{end:true,payout:0.6},
+      '_B3S_':{end:true,payout:0.7},'_A9S_':{end:true,payout:0.8},'_B2F_':{end:true,payout:0},
+      '_A4F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_C1F_':{end:true,payout:0},
+    }
+  },
+  'Stacking the Deck': {
+    level: 6,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Cat Burglar',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Driver',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A2_C2_':{role:'Driver',pass:'_A3_C1_',fail:'_B1_C1_'},
+      '_A3_C1_':{role:'Cat Burglar',pass:'_A4_C1_',fail:'_B1_C1_'},
+      '_B1_C1_':{role:'Imitator',pass:'_B2_C1_',fail:'_B1_C2_'},
+      '_B1_C2_':{role:'Imitator',pass:'_B2_C1_',fail:'_B1F_'},
+      '_A1_C2_':{roles:['Cat Burglar','Imitator'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_A4_C1_':{role:'Hacker',pass:'_A5_C1_',fail:'_B2_C1_'},
+      '_B2_C1_':{role:'Hacker',pass:'_B3_C1_',fail:'_B2_C2_'},
+      '_B2_C2_':{role:'Imitator',pass:'_B3_C1_',fail:'_B2F_'},
+      '_B3_C1_':{role:'Imitator',pass:'_B4_C1_',fail:'_B3_C2_'},
+      '_B4_C1_':{role:'Hacker',pass:'_B5S_',fail:'_B4S_'},
+      '_A5_C1_':{role:'Hacker',pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A5_C2_':{role:'Imitator',pass:'_A6S_',fail:'_A5F_'},
+      '_A6_C1_':{role:'Imitator',pass:'_A7S_',fail:'_A6S_'},
+      '_B3_C2_':{role:'Hacker',pass:'_B4S_',fail:'_B3F_'},
+      '_A7S_':{end:true,payout:1.0},'_B3F_':{end:true,payout:0},'_B2F_':{end:true,payout:0},
+      '_B5S_':{end:true,payout:0.8},'_A5F_':{end:true,payout:0},'_A6S_':{end:true,payout:0.85},
+      '_B1F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_B4S_':{end:true,payout:0.7},
+    }
+  },
+  'Best of the Lot': {
+    level: 2,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Picklock',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Imitator',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A2_C2_':{role:'Muscle',pass:'_A3_C1_',fail:'_A2_C3_'},
+      '_A2_C3_':{role:'Imitator',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3_C1_':{roles:['Car Thief','Thief'],pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Muscle',pass:'_A4_C3_',fail:'_A3_C3_'},
+      '_A4_C3_':{role:'Muscle',pass:'_B1_C1_',fail:'_A4F_'},
+      '_B1_C1_':{role:'Imitator',pass:'_B2S_',fail:'_B1_C2_'},
+      '_A3_C3_':{role:'Imitator',pass:'_A4_C3_',fail:'_A3F_'},
+      '_B1_C2_':{roles:['Picklock','Muscle'],pass:'_B3S_',fail:'_B1F_'},
+      '_A4_C1_':{role:'Picklock',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{roles:['Car Thief','Picklock','Thief'],pass:'_B1_C1_',fail:'_A4_C3_'},
+      '_A1_C2_':{role:'Muscle',pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A5_C1_':{role:'Muscle',pass:'_A6S_',fail:'_A5_C2_'},
+      '_A5_C2_':{role:'Imitator',pass:'_A7S_',fail:'_A8S_'},
+      '_A1_C3_':{roles:['Car Thief','Muscle','Thief'],pass:'_A1F2_',fail:'_A1F1_'},
+      '_B2S_':{end:true,payout:0.85},'_B3S_':{end:true,payout:0.75},'_A8S_':{end:true,payout:0.7},
+      '_A7S_':{end:true,payout:0.9},'_A6S_':{end:true,payout:1.0},'_A4F_':{end:true,payout:0},
+      '_A1F1_':{end:true,payout:0},'_A3F_':{end:true,payout:0},'_B1F_':{end:true,payout:0},
+      '_A2F_':{end:true,payout:0},'_A1F2_':{end:true,payout:0},
+    }
+  },
+  'Pet Project': {
+    level: 1,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Picklock',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Kidnapper',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Kidnapper',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A4_C1_':{role:'Muscle',pass:'_A5_C1_',fail:'_C1_C1_'},
+      '_A5_C1_':{role:'Kidnapper',pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A6_C1_':{role:'Muscle',pass:'_A7_C1_',fail:'_A6_C2_'},
+      '_A6_C2_':{role:'Picklock',pass:'_A7_C1_',fail:'_A6_C3_'},
+      '_A6_C3_':{role:'Muscle',pass:'_A8S_',fail:'_A6F_'},
+      '_A2_C2_':{role:'Kidnapper',pass:'_A3_C1_',fail:'_B1_C1_'},
+      '_A3_C2_':{role:'Muscle',pass:'_A4_C1_',fail:'_C1_C1_'},
+      '_C1_C1_':{roles:['Picklock','Kidnapper'],pass:'_C3S_',fail:'_C1F_'},
+      '_A1_C2_':{role:'Muscle',pass:'_B1_C1_',fail:'_A1_C3_'},
+      '_A1_C3_':{role:'Picklock',pass:'_A2_C1_',fail:'_A1F_'},
+      '_A7_C1_':{role:'Picklock',pass:'_A7S1_',fail:'_A7_C2_'},
+      '_A5_C2_':{role:'Muscle',pass:'_A6_C1_',fail:'_C1_C1_'},
+      '_B1_C1_':{role:'Muscle',pass:'_B2_C1_',fail:'_B1_C2_'},
+      '_B1_C2_':{role:'Muscle',pass:'_B2_C1_',fail:'_B1F_'},
+      '_A7_C2_':{role:'Muscle',pass:'_A7S2_',fail:'_A7F_'},
+      '_B2_C1_':{role:'Kidnapper',pass:'_B3S_',fail:'_B2F_'},
+      '_C3S_':{end:true,payout:0.6444},'_A7S1_':{end:true,payout:1.0},
+      '_A7S2_':{end:true,payout:0.8871},'_B3S_':{end:true,payout:0.6142},
+      '_A8S_':{end:true,payout:0.7874},'_A7F_':{end:true,payout:0},
+      '_B2F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},
+      '_B1F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_C1F_':{end:true,payout:0},
+    }
+  },
+  'Ace in the Hole': {
+    level: 7,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Imitator',pass:'_A2_C1_',fail:'_B2_C1_'},
+      '_A2_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Hacker',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Hacker',pass:'_A4_C1_',fail:'_A3_C3_'},
+      '_A4_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{role:'Imitator',pass:'_A5_C1_',fail:'_A4_C3_'},
+      '_A5_C1_':{role:'Driver',pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A6_C1_':{role:'Hacker',pass:'_A7_C1_',fail:'_C6_C1_'},
+      '_A7_C1_':{role:'Imitator',pass:'_A8S_',fail:'_A7_C2_'},
+      '_A7_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_A9S_',fail:'_A10S_'},
+      '_C6_C1_':{role:'Imitator',pass:'_C7_C1_',fail:'_C6_C2_'},
+      '_C7_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_C8S_',fail:'_C7F_'},
+      '_B2_C1_':{role:'Muscle 2',pass:'_B3_C1_',fail:'_B2_C2_'},
+      '_B3_C1_':{role:'Hacker',pass:'_B4_C1_',fail:'_B3_C2_'},
+      '_B4_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_B5_C1_',fail:'_B4_C2_'},
+      '_B5_C1_':{role:'Driver',pass:'_B6_C1_',fail:'_B5_C2_'},
+      '_B5_C2_':{role:'Driver',pass:'_D6_C1_',fail:'_B5F_'},
+      '_A4_C3_':{roles:['Imitator','Muscle 2'],pass:'_A5_C1_',fail:'_A4F_'},
+      '_A5_C2_':{role:'Driver',pass:'_A6_C1_',fail:'_A5_C3_'},
+      '_B3_C2_':{role:'Hacker',pass:'_B4_C1_',fail:'_B3F_'},
+      '_A5_C3_':{role:'Driver',pass:'_A6_C1_',fail:'_C6_C1_'},
+      '_C6_C2_':{roles:['Imitator','Muscle 2'],pass:'_C9S_',fail:'_C6F_'},
+      '_B2_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_B3_C1_',fail:'_B2F_'},
+      '_D6_C1_':{role:'Hacker',pass:'_D7S_',fail:'_D6_C2_'},
+      '_B6_C1_':{role:'Hacker',pass:'_B7S_',fail:'_B6_C2_'},
+      '_A3_C3_':{role:'Hacker',pass:'_A4_C1_',fail:'_A3F_'},
+      '_A2_C2_':{role:'Muscle 1',pass:'_A3_C1_',fail:'_A2_C3_'},
+      '_B4_C2_':{role:'Muscle 1',pass:'_B5_C1_',fail:'_B4F_'},
+      '_D6_C2_':{role:'Hacker',pass:'_D7S_',fail:'_D6F_'},
+      '_B6_C2_':{role:'Hacker',pass:'_B7S_',fail:'_B6F_'},
+      '_A2_C3_':{roles:['Muscle 2','Muscle 1'],pass:'_A3_C1_',fail:'_A2F_'},
+      '_A10S_':{end:true,payout:0.7343},'_C8S_':{end:true,payout:0.6766},
+      '_A8S_':{end:true,payout:1.0},'_D7S_':{end:true,payout:0.6101},
+      '_B7S_':{end:true,payout:0.7793},'_C9S_':{end:true,payout:0.5883},
+      '_A9S_':{end:true,payout:0.7904},'_D6F_':{end:true,payout:0},
+      '_C7F_':{end:true,payout:0},'_B3F_':{end:true,payout:0},'_B2F_':{end:true,payout:0},
+      '_C6F_':{end:true,payout:0},'_A4F_':{end:true,payout:0},'_B4F_':{end:true,payout:0},
+      '_B6F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+      '_B5F_':{end:true,payout:0},
+    }
+  },
+  'Crane Reaction': {
+    level: 7,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A1_C2_':{roles:['Sniper','Muscle 2'],pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A1_C3_':{roles:['Muscle 1','Muscle 2'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_A2_C1_':{roles:['Engineer','Lookout'],pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Bomber',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{roles:['Sniper','Bomber'],pass:'_A4_C1_',fail:'_A3F_'},
+      '_A4_C1_':{roles:['Lookout','Sniper','Muscle 1','Muscle 2'],pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{roles:['Lookout','Sniper'],pass:'_A5_C1_',fail:'_A4_C3_'},
+      '_A5_C1_':{roles:['Engineer','Bomber'],pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A5_C2_':{roles:['Engineer','Bomber'],pass:'_A6_C1_',fail:'_B5_C1_'},
+      '_B5_C1_':{roles:['Engineer','Bomber'],pass:'_B6_C1_',fail:'_B5_C2_'},
+      '_B5_C2_':{roles:['Engineer','Bomber'],pass:'_B6_C1_',fail:'_B5F_'},
+      '_A2_C2_':{roles:['Sniper','Driver'],pass:'_A3_C1_',fail:'_A2F_'},
+      '_A6_C1_':{roles:['Lookout','Sniper'],pass:'_A7_C1_',fail:'_A6_C2_'},
+      '_A6_C2_':{roles:['Muscle 1','Muscle 2'],pass:'_B7_C1_',fail:'_B6_C1_'},
+      '_B7_C1_':{roles:['Muscle 1','Muscle 2'],pass:'_B7S_',fail:'_B7_C2_'},
+      '_B7_C2_':{roles:['Lookout','Sniper'],pass:'_B7S2_',fail:'_B7F_'},
+      '_A7_C1_':{roles:['Muscle 2','Muscle 1'],pass:'_A8S_',fail:'_A7_C2_'},
+      '_A7_C2_':{role:'Bomber',pass:'_A8S2_',fail:'_A7_C3_'},
+      '_A4_C3_':{roles:['Muscle 1','Muscle 2'],pass:'_A5_C1_',fail:'_A4F_'},
+      '_B6_C1_':{roles:['Lookout','Sniper'],pass:'_B7_C1_',fail:'_B6_C2_'},
+      '_B6_C2_':{role:'Lookout',pass:'_B7_C1_',fail:'_B6F_'},
+      '_A7_C3_':{roles:['Engineer','Muscle 1','Muscle 2'],pass:'_A8S3_',fail:'_A7F_'},
+      '_A8S_':{end:true,payout:1.0},'_A8S2_':{end:true,payout:0.9},'_B7S_':{end:true,payout:0.75},
+      '_A8S3_':{end:true,payout:0.8},'_B7S2_':{end:true,payout:0.65},'_A7F_':{end:true,payout:0},
+      '_A4F_':{end:true,payout:0},'_B7F_':{end:true,payout:0},'_B6F_':{end:true,payout:0},
+      '_A3F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+      '_B5F_':{end:true,payout:0},
+    }
+  },
+  'Gone Fission': {
+    level: 6,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Hijacker',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Hijacker',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A2_C2_':{roles:['Hijacker','Engineer'],pass:'_A3_C1_',fail:'_A2F_'},
+      '_A1_C2_':{roles:['Hijacker','Bomber'],pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A3_C1_':{role:'Engineer',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{roles:['Engineer','Bomber'],pass:'_A4_C1_',fail:'_A3_C3_'},
+      '_A4_C1_':{role:'Imitator',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{role:'Pickpocket',pass:'_A5_C1_',fail:'_A4_C3_'},
+      '_A5_C1_':{roles:['Pickpocket','Imitator'],pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A6_C1_':{role:'Bomber',pass:'_A7_C1_',fail:'_A6_C2_'},
+      '_A6_C2_':{role:'Bomber',pass:'_A7_C1_',fail:'_A6_C3_'},
+      '_A7_C1_':{role:'Imitator',pass:'_A8S_',fail:'_A7_C2_'},
+      '_A4_C3_':{role:'Imitator',pass:'_A5_C1_',fail:'_A4F_'},
+      '_A5_C2_':{roles:['Pickpocket','Imitator'],pass:'_A6_C1_',fail:'_A5F_'},
+      '_A7_C2_':{role:'Engineer',pass:'_A8S2_',fail:'_A8S3_'},
+      '_A1_C3_':{role:'Hijacker',pass:'_A2_C1_',fail:'_A1C3F_'},
+      '_A6_C3_':{roles:['Pickpocket','Bomber'],pass:'_A7_C1_',fail:'_A6F_'},
+      '_A3_C3_':{role:'Engineer',pass:'_A4_C1_',fail:'_A3F_'},
+      '_A8S_':{end:true,payout:1.0},'_A8S2_':{end:true,payout:0.85},'_A1C3F_':{end:true,payout:0},
+      '_A5F_':{end:true,payout:0},'_A4F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},
+      '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A8S3_':{end:true,payout:0.7},
+    }
+  },
+  'Manifest Cruelty': {
+    level: 9,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{roles:['Cat Burglar','Interrogator'],pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Interrogator',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Cat Burglar',pass:'_A4_C1_',fail:'_B4_C1_'},
+      '_A4_C1_':{role:'Hacker',pass:'_A5_C1_',fail:'_B4_C1_'},
+      '_A5_C1_':{roles:['Interrogator','Reviver'],pass:'_A6_C1_',fail:'_A5_C2_'},
+      '_A5_C2_':{role:'Reviver',pass:'_A6_C1_',fail:'_A5F_'},
+      '_A6_C1_':{role:'Hacker',pass:'_A7_C1_',fail:'_A6_C2_'},
+      '_A7_C1_':{role:'Interrogator',pass:'_A8S_',fail:'_A7_C2_'},
+      '_A7_C2_':{roles:['Interrogator','Reviver'],pass:'_A7S_',fail:'_A7F_'},
+      '_A1_C2_':{roles:['Reviver','Hacker'],pass:'_A2_C1_',fail:'_A1_C3_'},
+      '_A2_C2_':{role:'Interrogator',pass:'_A3_C1_',fail:'_A2_C3_'},
+      '_A6_C2_':{role:'Cat Burglar',pass:'_A7_C1_',fail:'_A6_C3_'},
+      '_B4_C1_':{role:'Interrogator',pass:'_B5_C1_',fail:'_B4_C2_'},
+      '_B5_C1_':{role:'Reviver',pass:'_B6_C1_',fail:'_B5_C2_'},
+      '_B6_C1_':{roles:['Cat Burglar','Hacker'],pass:'_B7S_',fail:'_B6_C2_'},
+      '_B4_C2_':{role:'Reviver',pass:'_B5_C1_',fail:'_B4_C3_'},
+      '_B4_C3_':{roles:['Interrogator','Reviver'],pass:'_B5_C1_',fail:'_B4F_'},
+      '_A2_C3_':{roles:['Interrogator','Reviver'],pass:'_A3_C1_',fail:'_A2F_'},
+      '_A1_C3_':{roles:['Reviver','Hacker'],pass:'_A2_C1_',fail:'_A1F_'},
+      '_B5_C2_':{role:'Reviver',pass:'_B6_C1_',fail:'_B5F_'},
+      '_B6_C2_':{roles:['Cat Burglar','Hacker'],pass:'_B7S_',fail:'_B6F_'},
+      '_A6_C3_':{roles:['Cat Burglar','Hacker'],pass:'_A7_C1_',fail:'_A6F_'},
+      '_A8S_':{end:true,payout:1.0},'_A7S_':{end:true,payout:0.9},'_A7F_':{end:true,payout:0},
+      '_A5F_':{end:true,payout:0},'_A6F_':{end:true,payout:0},'_B4F_':{end:true,payout:0},
+      '_B6F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},
+      '_B7S_':{end:true,payout:0.75},'_B5F_':{end:true,payout:0},
+    }
+  },
+  'Cash Me if You Can': {
+    level: 2,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Lookout',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Thief 1',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Thief 2',pass:'_A3S_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Thief 1',pass:'_A3S_',fail:'_A3F_'},
+      '_A1_C2_':{role:'Thief 1',pass:'_A2_C1_',fail:'_A1F_'},
+      '_A2_C2_':{role:'Thief 2',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3S_':{end:true,payout:1.0},
+      '_A3F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+    }
+  },
+  'First Aid and Abet': {
+    level: 1,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Decoy',pass:'_A2_C1_',fail:'_A2_C1_'},
+      '_A2_C1_':{role:'Picklock',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Pickpocket',pass:'_A3S_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Picklock',pass:'_A3S_',fail:'_A3F_'},
+      '_A2_C2_':{role:'Pickpocket',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A3S_':{end:true,payout:1.0},
+      '_A3F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},
+    }
+  },
+  'Market Forces': {
+    level: 3,
+    start:'_A1_C1_', nodes:{
+      '_A1_C1_':{role:'Lookout',pass:'_A2_C1_',fail:'_A1_C2_'},
+      '_A2_C1_':{role:'Negotiator',pass:'_A3_C1_',fail:'_A2_C2_'},
+      '_A3_C1_':{role:'Enforcer',pass:'_A4_C1_',fail:'_A3_C2_'},
+      '_A3_C2_':{role:'Negotiator',pass:'_A4_C1_',fail:'_A3_C3_'},
+      '_A4_C1_':{role:'Arsonist',pass:'_A5_C1_',fail:'_A4_C2_'},
+      '_A4_C2_':{role:'Arsonist',pass:'_B5_C1_',fail:'_A4S_'},
+      '_B5_C1_':{role:'Muscle',pass:'_B5S_',fail:'_B5_C2_'},
+      '_B5_C2_':{roles:['Enforcer','Lookout'],pass:'_B5S_',fail:'_B5F_'},
+      '_A1_C2_':{role:'Enforcer',pass:'_A2_C1_',fail:'_A1F_'},
+      '_A5_C1_':{role:'Muscle',pass:'_A7_C1_',fail:'_A5_C2_'},
+      '_A7_C1_':{role:'Negotiator',pass:'_A8_C1_',fail:'_A7_C2_'},
+      '_A7_C2_':{role:'Negotiator',pass:'_A8_C1_',fail:'_A7S_'},
+      '_A8_C1_':{role:'Muscle',pass:'_A8S_',fail:'_A8S2_'},
+      '_A2_C2_':{role:'Muscle',pass:'_A3_C1_',fail:'_A2F_'},
+      '_A5_C2_':{roles:['Enforcer','Lookout'],pass:'_A7_C1_',fail:'_A5S_'},
+      '_A3_C3_':{role:'Muscle',pass:'_B4_C1_',fail:'_A3F_'},
+      '_B4_C1_':{role:'Arsonist',pass:'_B5_C1_',fail:'_B4F_'},
+      '_B5S_':{end:true,payout:0.5587},'_A8S_':{end:true,payout:1.0},
+      '_A8S2_':{end:true,payout:0.9145},'_A7S_':{end:true,payout:0.8427},
+      '_A4S_':{end:true,payout:0.7022},'_A5S_':{end:true,payout:0.6345},
+      '_B4F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},
+      '_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0},'_B5F_':{end:true,payout:0},
     }
   },
 };
 
-// ── ROLE PASS PROBABILITY ────────────────────────────────────────────────────
-
-// Maps CPR percentage to approximate pass probability for a checkpoint
-// Based on community data and flowchart analysis
-function getPassProbability(cpr, role) {
-  if(cpr === null || cpr === undefined) return 0.55; // unknown CPR — use pessimistic estimate
-
-  const base = getRoleBase(role);
-  const rc = getRoleCPRRange(role);
-
-  if(rc.safe) return 0.90; // safe roles always high pass rate
-
-  // Sigmoid curve centred on ideal midpoint
-  const idealMid = (rc.idealMin + rc.idealMax) / 2;
-  const spread = 15;
-  const raw = 1 / (1 + Math.exp(-(cpr - idealMid) / spread));
-
-  // Clamp to realistic range [0.35, 0.95]
-  return Math.max(0.35, Math.min(0.95, raw));
-}
-
-// ── SIMULATE OC ──────────────────────────────────────────────────────────────
+// ── SIMULATION ────────────────────────────────────────────────────────────────
+const BASELINE = 68;
 
 function simulateOC(ocName, cprs) {
-  const flowchart = FLOWCHARTS[ocName];
-  if(!flowchart) return null;
+  const fg = FLOWCHARTS[ocName];
+  if(!fg) return null;
 
-  const nodes = flowchart.nodes;
-  let successChance = 0;
-  let expectedValue = 0;
-
-  // Recursive DAG traversal with memoization
-  const memo = {};
-
-  function traverse(nodeId, probability) {
-    if(probability < 0.0001) return; // prune negligible paths
-    if(memo[nodeId] !== undefined) {
-      // Already computed from this node — scale by current probability
-      successChance += memo[nodeId].sc * probability;
-      expectedValue += memo[nodeId].ev * probability;
-      return;
-    }
-
-    const node = nodes[nodeId];
-    if(!node) return;
-
-    if(node.end) {
-      successChance += (node.payout > 0 ? 1 : 0) * probability;
-      expectedValue += node.payout * probability;
-      return;
-    }
-
-    // Get roles for this checkpoint
-    const roles = node.roles || (node.role ? [node.role] : []);
-
-    // Calculate pass probability — if multiple roles, use best available CPR
-    let passProbability = 0;
-    if(roles.length === 0) {
-      passProbability = 0.75; // unspecified checkpoint
-    } else if(roles.length === 1) {
-      const cpr = cprs[roles[0]] ?? null;
-      passProbability = getPassProbability(cpr, roles[0]);
-    } else {
-      // Multi-role checkpoint — takes the best CPR among the roles listed
-      let bestProb = 0;
-      roles.forEach(r => {
-        const cpr = cprs[r] ?? null;
-        const prob = getPassProbability(cpr, r);
-        if(prob > bestProb) bestProb = prob;
-      });
-      passProbability = bestProb;
-    }
-
-    traverse(node.pass, probability * passProbability);
-    traverse(node.fail, probability * (1 - passProbability));
+  function getCPR(role) {
+    if(cprs[role] !== undefined) return cprs[role] / 100;
+    const base = role.replace(/\s+\d+$/, '');
+    if(cprs[base] !== undefined) return cprs[base] / 100;
+    return BASELINE / 100;
   }
 
-  traverse(flowchart.start, 1.0);
+  function walkSuccess(nodeId, prob, visited) {
+    if(prob < 0.0001 || visited.has(nodeId)) return 0;
+    const node = fg.nodes[nodeId];
+    if(!node) return 0;
+    if(node.end) return node.payout > 0 ? prob : 0;
+    visited.add(nodeId);
+    const p = node.roles
+      ? node.roles.reduce((a, r) => a + getCPR(r), 0) / node.roles.length
+      : getCPR(node.role);
+    const r = walkSuccess(node.pass, prob * p, new Set(visited)) +
+              walkSuccess(node.fail, prob * (1 - p), new Set(visited));
+    visited.delete(nodeId);
+    return r;
+  }
+
+  function walkExpected(nodeId, prob, visited) {
+    if(prob < 0.0001 || visited.has(nodeId)) return 0;
+    const node = fg.nodes[nodeId];
+    if(!node) return 0;
+    if(node.end) return prob * node.payout;
+    visited.add(nodeId);
+    const p = node.roles
+      ? node.roles.reduce((a, r) => a + getCPR(r), 0) / node.roles.length
+      : getCPR(node.role);
+    const r = walkExpected(node.pass, prob * p, new Set(visited)) +
+              walkExpected(node.fail, prob * (1 - p), new Set(visited));
+    visited.delete(nodeId);
+    return r;
+  }
 
   return {
-    successChance: Math.round(successChance * 100),
-    expectedValue: parseFloat(expectedValue.toFixed(4)),
+    successChance: Math.round(walkSuccess(fg.start, 1.0, new Set()) * 100),
+    expectedValue:  walkExpected(fg.start, 1.0, new Set()),
   };
 }
 
@@ -1102,7 +1403,7 @@ setInterval(async () => {
 app.get('/', (req, res) => {
   res.json({
     status:  'ok',
-    version: '2.0.0',
+    version: '2.1.0',
     ocs:     Object.keys(FLOWCHARTS).length,
   });
 });
