@@ -1,14 +1,15 @@
 {
-  "name": "oca-server",
-  "version": "1.0.0",
-  "description": "OC Advisor — server-side DAG scoring engine",
+  "name": "hive-oc-advisor-server",
+  "version": "2.0.0",
+  "description": "Hive OC Advisor — Server-side DAG scoring and optimization engine",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "pg": "^8.11.0"
   },
   "engines": {
     "node": ">=18.0.0"
