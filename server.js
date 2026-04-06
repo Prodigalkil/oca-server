@@ -344,6 +344,19 @@ function getRoleCPRRange(role) {
   return ROLE_CPR_RANGES[role] || ROLE_CPR_RANGES[base] || {idealMin:58,idealMax:74,absMin:50,overQual:85,safe:false};
 }
 
+// Torn sometimes renders OC names with different capitalisation than our keys.
+// Normalise on every inbound OC name before flowchart lookup.
+const OC_NAME_ALIASES = {
+  'cash me if you can': 'Cash Me If You Can',
+  'guardian ángels':    'Guardian Angels',
+  'market force':       'Market Forces',
+};
+function normOCName(name) {
+  if (!name) return name;
+  const trimmed = name.trim();
+  return OC_NAME_ALIASES[trimmed.toLowerCase()] || trimmed;
+}
+
 // ── FLOWCHARTS (all 27 OCs) ──────────────────────────────────
 const FLOWCHARTS = {
   'Bidding War':{level:6,start:'_A1_C1_',nodes:{'_A1_C1_':{role:'Bomber 1',pass:'_A2_C1_',fail:'_A1_C2_'},'_A1_C2_':{roles:['Bomber 1','Bomber 2'],pass:'_A2_C1_',fail:'_A1_C3_'},'_A2_C1_':{role:'Driver',pass:'_A3_C1_',fail:'_A2_C2_'},'_A2_C2_':{role:'Driver',pass:'_A3_C1_',fail:'_A2_C3_'},'_A3_C1_':{role:'Robber 1',pass:'_A4_C1_',fail:'_A3_C2_'},'_A3_C2_':{role:'Robber 2',pass:'_A4_C1_',fail:'_A3_C3_'},'_A4_C1_':{role:'Robber 3',pass:'_A5_C1_',fail:'_A4_C2_'},'_A5_C1_':{role:'Robber 3',pass:'_A6_C1_',fail:'_A5_C2_'},'_A5_C2_':{role:'Robber 2',pass:'_A6_C2_',fail:'_A5F_'},'_A4_C2_':{role:'Bomber 2',pass:'_A5_C1_',fail:'_A4_C3_'},'_A4_C3_':{role:'Robber 1',pass:'_A4F2_',fail:'_A4F_'},'_A6_C1_':{roles:['Driver','Robber 3'],pass:'_A7_C1_',fail:'_A6_C2_'},'_A7_C1_':{role:'Bomber 2',pass:'_A8S_',fail:'_A8S2_'},'_A3_C3_':{roles:['Robber 1','Robber 2'],pass:'_A4_C1_',fail:'_A3F_'},'_A6_C2_':{role:'Robber 2',pass:'_A6S_',fail:'_A6S2_'},'_A1_C3_':{roles:['Driver','Bomber 1'],pass:'_A2_C1_',fail:'_A1F_'},'_A2_C3_':{role:'Driver',pass:'_A3_C1_',fail:'_A2F_'},'_A8S_':{end:true,payout:1.0},'_A8S2_':{end:true,payout:0.7678},'_A6S_':{end:true,payout:0.6991},'_A6S2_':{end:true,payout:0.5954},'_A4F2_':{end:true,payout:0},'_A4F_':{end:true,payout:0},'_A5F_':{end:true,payout:0},'_A3F_':{end:true,payout:0},'_A1F_':{end:true,payout:0},'_A2F_':{end:true,payout:0}}},
@@ -639,19 +652,30 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     }
   }
 
-  // Personal recommendation
+  // Personal recommendation — find the BEST slot for this member by level.
+  // We use the priority queue (already sorted by ocLevel desc) rather than
+  // the greedy assignment, because greedy may have placed the member in a
+  // lower-level OC after higher-level slots were taken by others.
+  // This tells the member their single best available join target.
   let personalRecommendation = null;
   if (requestingMember) {
-    for (const optOC of optimizedOCs) {
-      const my = optOC.team.find(a => a.member === requestingMember);
-      if (my) {
-        personalRecommendation = {member: requestingMember, ocName: optOC.ocName, level: optOC.level, role: my.role, cpr: my.cpr, roleType: my.roleType, projectedSuccess: optOC.projectedSuccess, impact: my.impact, flag: my.flag};
-        break;
-      }
-    }
-    if (!personalRecommendation) {
-      const best = queue.find(i => i.member === requestingMember);
-      if (best) personalRecommendation = {member: requestingMember, ocName: best.ocName, level: best.ocLevel, role: best.role, cpr: best.cpr, roleType: best.roleType, projectedSuccess: null, impact: parseFloat(best.delta.toFixed(1)), flag: best.flag};
+    // Find highest-priority queue entry for this member
+    const bestQueueEntry = queue.find(i => i.member === requestingMember);
+
+    if (bestQueueEntry) {
+      // Cross-reference with optimizedOCs to get the projected OC success %
+      const optOC = optimizedOCs.find(o => o.ocName === bestQueueEntry.ocName);
+      personalRecommendation = {
+        member:           requestingMember,
+        ocName:           bestQueueEntry.ocName,
+        level:            bestQueueEntry.ocLevel,
+        role:             bestQueueEntry.role,
+        cpr:              bestQueueEntry.cpr,
+        roleType:         bestQueueEntry.roleType,
+        projectedSuccess: optOC?.projectedSuccess ?? null,
+        impact:           parseFloat(bestQueueEntry.delta.toFixed(1)),
+        flag:             bestQueueEntry.flag,
+      };
     }
   }
 
@@ -666,7 +690,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'2.8.0', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'2.8.1', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -699,11 +723,14 @@ app.post('/api/optimize', rateLimit('optimize'), async (req, res) => {
   const {ocs, requestingMember} = req.body;
   if (!Array.isArray(ocs) || ocs.length === 0) return res.status(400).json({error:'ocs must be non-empty array'});
   const factionId = getFactionId(key);
-  const cacheKey  = hashObject({ocs: ocs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember});
+  // Normalise OC names from client (Torn may send different capitalisation)
+  const normalizedOCs = ocs.map(o => ({...o, ocName: normOCName(o.ocName)}));
+
+  const cacheKey  = hashObject({ocs: normalizedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember});
   const cached = await getCachedOptimize(factionId, cacheKey);
   if (cached) return res.json({...cached, cached:true});
   try {
-    const result = await optimizeFaction(factionId, ocs, requestingMember);
+    const result = await optimizeFaction(factionId, normalizedOCs, requestingMember);
     await setCachedOptimize(factionId, cacheKey, result);
     res.json({...result, cached:false});
   } catch(e) {
@@ -795,10 +822,11 @@ app.post('/api/cpr/history', rateLimit('cpr_history'), async (req, res) => {
   const byMember = {};
   records.forEach(({memberName, ocName, role, cpr}) => {
     if (!memberName || !ocName || !role || cpr === undefined) return;
+    const normName = normOCName(ocName);
     if (!byMember[memberName]) byMember[memberName] = {};
-    if (!byMember[memberName][ocName]) byMember[memberName][ocName] = {};
-    const ex = byMember[memberName][ocName][role];
-    if (ex === undefined || cpr > ex) byMember[memberName][ocName][role] = cpr;
+    if (!byMember[memberName][normName]) byMember[memberName][normName] = {};
+    const ex = byMember[memberName][normName][role];
+    if (ex === undefined || cpr > ex) byMember[memberName][normName][role] = cpr;
   });
   let updated = 0;
   const client = await pool.connect();
@@ -991,7 +1019,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v2.8.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v2.8.1 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
