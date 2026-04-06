@@ -575,6 +575,11 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
   }
 
   // Priority queue
+  // Score = (ocLevel × 1000) + (roleTypePriority × 100) + delta
+  // Members with no CPR data on critical roles get a -500 penalty so they
+  // never displace a CPR-known member from a high-level slot.
+  // Members with known CPR below absolute minimum on critical roles also get
+  // a penalty proportional to how far below they are.
   const queue = [];
   for (const member of memberPool) {
     for (const oc of ocs) {
@@ -582,13 +587,27 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
       for (const role of (oc.openRoles || [])) {
         const impact = impactMatrix[member.name]?.[oc.ocName]?.[role];
         if (!impact) continue;
-        const lvlBonus = 1 + (ocLevel - 1) * 0.05;
+
+        const rc = getRoleCPRRange(role);
+        let priorityScore = (ocLevel * 1000) + (roleTypePriority(impact.roleType) * 100) + impact.delta;
+
+        // Penalise no-CPR-data members on non-safe critical roles heavily —
+        // they should only fill a slot if nobody with known CPR is available.
+        if (impact.flag === 'no_data' && !rc.safe && impact.roleType !== 'safe') {
+          priorityScore -= 500;
+        }
+        // Penalise unknown CPR (member exists in DB but no data for this OC/role)
+        // on gate/bottleneck roles — less severe than no_data
+        if (impact.flag === 'cpr_unknown' && ['gate','bottleneck'].includes(impact.roleType)) {
+          priorityScore -= 200;
+        }
+
         queue.push({
           member: member.name, memberStatus: member.status||'available',
           ocName: oc.ocName, ocLevel, role,
           roleType: impact.roleType, cpr: impact.cpr,
           delta: impact.delta, flag: impact.flag,
-          priorityScore: (ocLevel * 1000) + (roleTypePriority(impact.roleType) * 100) + impact.delta,
+          priorityScore,
         });
       }
     }
@@ -652,18 +671,17 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     }
   }
 
-  // Personal recommendation — find the BEST slot for this member by level.
-  // We use the priority queue (already sorted by ocLevel desc) rather than
-  // the greedy assignment, because greedy may have placed the member in a
-  // lower-level OC after higher-level slots were taken by others.
-  // This tells the member their single best available join target.
+  // Personal recommendation — find the best slot for this member.
+  // Uses the priority queue (sorted by level desc) but skips any slot
+  // already assigned to someone else in the greedy pass.
   let personalRecommendation = null;
   if (requestingMember) {
-    // Find highest-priority queue entry for this member
-    const bestQueueEntry = queue.find(i => i.member === requestingMember);
+    const bestQueueEntry = queue.find(i =>
+      i.member === requestingMember &&
+      !filledRoles[i.ocName]?.[i.role]   // slot not already taken
+    );
 
     if (bestQueueEntry) {
-      // Cross-reference with optimizedOCs to get the projected OC success %
       const optOC = optimizedOCs.find(o => o.ocName === bestQueueEntry.ocName);
       personalRecommendation = {
         member:           requestingMember,
@@ -690,7 +708,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'2.8.1', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'2.8.2', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1019,7 +1037,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v2.8.1 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v2.8.2 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
