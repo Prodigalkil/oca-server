@@ -1,21 +1,26 @@
 'use strict';
 
-const express  = require('express');
-const cors     = require('cors');
-const fs       = require('fs');
-const path     = require('path');
+const express = require('express');
+const cors = require('cors');
 const { Pool } = require('pg');
 
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 3000;
-
-/* =========================
-   DATABASE
-========================= */
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
+
+app.use(cors());
+app.use(express.json({ limit: '2mb' }));
+
+// Prevent crashes from bad JSON
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+  next(err);
 });
 
 async function query(sql, params) {
@@ -27,167 +32,59 @@ async function query(sql, params) {
   }
 }
 
-/* =========================
-   MIDDLEWARE
-========================= */
-
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || origin.includes('torn.com') || origin.includes('localhost')) cb(null, true);
-    else cb(null, true); // allow Railway health checks
-  }
-}));
-
-app.use(express.json({ limit: '2mb' }));
-
-// 🔥 JSON parse protection (prevents crash)
-app.use((err, req, res, next) => {
-  if (err instanceof SyntaxError) {
-    return res.status(400).json({ error: 'Invalid JSON body' });
-  }
-  next(err);
-});
-
-/* =========================
-   KEY SYSTEM
-========================= */
-
-function parseKey(key) {
-  const m = (key||'').match(/^OCA-([LMlm])(\d+)-(.+)$/i);
-  if(!m) return null;
-  return {
-    keyType:   m[1].toUpperCase(),
-    factionId: m[2],
-    ownerName: m[3].trim(),
-  };
-}
-
-function isLeaderKey(key) {
-  const parsed = parseKey(key);
-  return parsed ? parsed.keyType === 'L' : true;
-}
-
-function getFactionId(key) {
-  const parsed = parseKey(key);
-  return parsed ? parsed.factionId : '001';
-}
-
-async function validateKey(req, res) {
-  const key = req.headers['x-oca-key'] || req.query.key;
-  if (!key) {
-    res.status(401).json({ error: 'Missing API key' });
-    return null;
-  }
-  return 'ok';
-}
-
-/* =========================
-   SAFE CACHE STUB
-========================= */
-
-async function invalidateCache() {
-  return;
-}
-
-/* =========================
-   ROUTES
-========================= */
-
-/* CPR HISTORY */
-
-app.post('/api/cpr/history', async (req, res) => {
-  const key = req.headers['x-oca-key'] || req.query.key;
-  const owner = await validateKey(req, res);
-  if (!owner) return;
-
-  const { records } = req.body || {};
-
-  if (!Array.isArray(records)) {
-    return res.status(400).json({ error: 'records must be array' });
-  }
-
-  res.json({ ok: true });
-});
-
-/* CPR */
-
-app.post('/api/cpr', async (req, res) => {
-  const { memberName, cprs } = req.body || {};
-
-  if (!memberName || !cprs) {
-    return res.status(400).json({ error: 'Missing data' });
-  }
-
-  res.json({ ok: true });
-});
-
-/* CPR BATCH */
-
+// CPR batch (SAFE)
 app.post('/api/cpr/batch', async (req, res) => {
   const { members } = req.body || {};
 
-  if (!members) {
+  if (!members || typeof members !== 'object') {
     return res.status(400).json({ error: 'Missing members' });
   }
 
-  res.json({ ok: true });
+  try {
+    for (const [name, cprs] of Object.entries(members)) {
+      await query(
+        `INSERT INTO member_cpr (member_name, cprs)
+         VALUES ($1, $2)
+         ON CONFLICT (member_name)
+         DO UPDATE SET cprs = $2`,
+        [name, JSON.stringify(cprs)]
+      );
+    }
+
+    res.json({ ok: true, updated: Object.keys(members).length });
+  } catch (e) {
+    console.error('[CPR BATCH ERROR]', e);
+    res.status(500).json({ error: 'DB error' });
+  }
 });
 
-/* SCORE */
+// Optimize (FIXED RESPONSE)
+app.post('/api/optimize', async (req, res) => {
+  const { ocs } = req.body || {};
 
-app.post('/api/score', async (req, res) => {
-  const { ocName, cprs } = req.body || {};
-
-  if (!ocName || !cprs) {
-    return res.status(400).json({ error: 'Missing data' });
+  if (!Array.isArray(ocs)) {
+    return res.status(400).json({ error: 'Invalid OCs' });
   }
 
-  res.json({ successChance: 0.5, expectedValue: 1 });
+  const result = {
+    ocs,
+    meta: { processed: ocs.length }
+  };
+
+  res.json({ ...result, cached: false });
 });
 
-/* SCORE BATCH */
-
-app.post('/api/score/batch', async (req, res) => {
-  const { requests } = req.body || {};
-
-  if (!Array.isArray(requests)) {
-    return res.status(400).json({ error: 'Invalid requests' });
-  }
-
-  const results = requests.map(({ ocName, cprs } = {}) => ({
-    ocName,
-    successChance: 0.5,
-    expectedValue: 1
-  }));
-
-  res.json({ results });
+// Health check
+app.get('/', (req, res) => {
+  res.send('HiveOC server running');
 });
 
-/* PAYOUT */
-
-app.post('/api/payout/record', async (req, res) => {
-  const { records } = req.body || {};
-
-  if (!Array.isArray(records)) {
-    return res.status(400).json({ error: 'Invalid records' });
-  }
-
-  res.json({ ok: true });
-});
-
-/* =========================
-   GLOBAL ERROR HANDLER
-========================= */
-
+// Global safety net
 app.use((err, req, res, next) => {
-  console.error('[UNHANDLED]', err);
-  res.status(500).json({ error: 'Internal server error' });
+  console.error('[UNHANDLED ERROR]', err);
+  res.status(500).json({ error: 'Internal error' });
 });
-
-/* =========================
-   START SERVER
-========================= */
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[SERVER] Hive OC running on port ${PORT}`);
+  console.log(`[SERVER] Running on ${PORT}`);
 });
