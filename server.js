@@ -530,177 +530,376 @@ const STALE_MS = 7 * 24 * 60 * 60 * 1000;
 function isCPRStale(updatedAt) { return !updatedAt || Date.now() - new Date(updatedAt).getTime() > STALE_MS; }
 
 async function optimizeFaction(factionId, ocs, requestingMember) {
-  // Load empirical model
-  let empirical = {};
-  try {
-    const r = await query(`SELECT oc_name, AVG(max_money)::BIGINT AS mean, COUNT(*) AS n FROM oc_payouts WHERE faction_id=$1 AND max_money>0 GROUP BY oc_name`, [factionId]);
-    r.rows.forEach(row => { empirical[row.oc_name] = {meanPayout: parseInt(row.mean), samples: parseInt(row.n)}; });
-  } catch(e) {}
-
-  // Load CPR
+  // ── Load CPR from DB (TornStats only) ────────────────────────
   let memberCPRMap = {};
   try {
     const r = await query('SELECT member_name, source, cprs, updated_at FROM member_cpr WHERE faction_id=$1', [factionId]);
-    r.rows.forEach(row => { memberCPRMap[row.member_name] = {cprs: row.cprs, source: row.source, updatedAt: row.updated_at, isStale: isCPRStale(row.updated_at)}; });
+    r.rows.forEach(row => {
+      memberCPRMap[row.member_name] = {
+        cprs:      row.cprs,
+        source:    row.source,
+        updatedAt: row.updated_at,
+        isStale:   isCPRStale(row.updated_at),
+      };
+    });
   } catch(e) { console.error('[OPTIMIZE] CPR load error:', e.message); }
 
-  const memberPool = ocs[0]?.availableMembers || [];
-  const roleClassifications = {};
-  ocs.forEach(oc => { roleClassifications[oc.ocName] = classifyRoles(oc.ocName); });
+  // ── Tag each OC instance with a unique ID ────────────────────
+  // Duplicate OC names (5x Best of the Lot) each get ocId = "Name__0", "Name__1" etc.
+  const ocList = ocs.map((oc, idx) => ({ ...oc, ocId: `${oc.ocName}__${idx}` }));
 
-  // Build impact matrix
+  const memberPool = ocList[0]?.availableMembers || [];
+  const roleClass  = {};
+  ocList.forEach(oc => { roleClass[oc.ocName] = classifyRoles(oc.ocName); });
+
+  // ── Build impact matrix ───────────────────────────────────────
+  // For each (member, ocId, role):
+  //   cpr       — known CPR from TornStats, or null
+  //   flag      — 'no_data' | 'cpr_unknown' | 'cpr_stale' | null
+  //   blocked   — true if this member must NOT fill this role
+  //   delta     — projected success improvement with this member in this role
+  //               (uses absMin as effective CPR for unknown members on non-safe roles
+  //               so simulations are conservative, not optimistic)
   const impactMatrix = {};
   for (const member of memberPool) {
     impactMatrix[member.name] = {};
-    for (const oc of ocs) {
-      impactMatrix[member.name][oc.ocName] = {};
+    for (const oc of ocList) {
+      impactMatrix[member.name][oc.ocId] = {};
       const baseline = simulateOC(oc.ocName, oc.filledCPRs || {});
       if (!baseline) continue;
+
       for (const role of (oc.openRoles || [])) {
-        let cpr = getMemberCPR(memberCPRMap, member.name, oc.ocName, role);
+        const rc     = getRoleCPRRange(role);
+        const rClass = roleClass[oc.ocName]?.[role] || 'support';
+        const isSafe = rc.safe || rClass === 'safe';
+
+        let cpr  = getMemberCPR(memberCPRMap, member.name, oc.ocName, role);
         let flag = null;
-        if (cpr === null && memberCPRMap[member.name]) flag = 'cpr_unknown';
-        else if (cpr !== null && memberCPRMap[member.name]?.isStale) flag = 'cpr_stale';
-        else if (!memberCPRMap[member.name]) flag = 'no_data';
-        const rc = getRoleCPRRange(role);
-        const effectiveCPR = cpr !== null ? cpr : (rc.safe ? 50 : null);
-        let delta = 0;
-        if (effectiveCPR !== null) {
-          const withMember = simulateOC(oc.ocName, {...(oc.filledCPRs||{}), [role]: effectiveCPR});
-          delta = withMember ? withMember.successChance - baseline.successChance : 0;
+
+        if (!memberCPRMap[member.name]) {
+          flag = 'no_data';
+        } else if (cpr === null) {
+          flag = 'cpr_unknown';
+        } else if (memberCPRMap[member.name].isStale) {
+          flag = 'cpr_stale';
         }
-        impactMatrix[member.name][oc.ocName][role] = {delta, cpr, flag, roleType: roleClassifications[oc.ocName][role]||'support'};
+
+        // ── HARD BLOCK RULES ────────────────────────────────────
+        // 1. No CPR data at all → block from every non-safe role
+        if (flag === 'no_data' && !isSafe) {
+          impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, roleType: rClass, blocked: true };
+          continue;
+        }
+        // 2. In DB but no CPR for this specific OC/role → block from non-safe roles
+        if (flag === 'cpr_unknown' && !isSafe) {
+          impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, roleType: rClass, blocked: true };
+          continue;
+        }
+        // 3. Known CPR below absMin → block from that role regardless of criticality
+        if (cpr !== null && !isSafe && cpr < rc.absMin) {
+          impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, roleType: rClass, blocked: true };
+          continue;
+        }
+
+        // ── SIMULATION ──────────────────────────────────────────
+        // Use actual CPR for known members.
+        // For safe roles with no_data/unknown, use a neutral 50%.
+        // For stale CPR, use it but flag it.
+        let effectiveCPR;
+        if (cpr !== null) {
+          effectiveCPR = cpr;
+        } else if (isSafe) {
+          effectiveCPR = 50; // safe roles don't matter much — any member is fine
+        } else {
+          // should have been blocked above — defensive fallback
+          impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, roleType: rClass, blocked: true };
+          continue;
+        }
+
+        const withMember = simulateOC(oc.ocName, { ...(oc.filledCPRs||{}), [role]: effectiveCPR });
+        const delta = withMember ? withMember.successChance - baseline.successChance : 0;
+
+        impactMatrix[member.name][oc.ocId][role] = { cpr, flag, delta, roleType: rClass, blocked: false };
       }
     }
   }
 
-  // Priority queue
-  // Score = (ocLevel × 1000) + (roleTypePriority × 100) + delta
-  // Members with no CPR data on critical roles get a -500 penalty so they
-  // never displace a CPR-known member from a high-level slot.
-  // Members with known CPR below absolute minimum on critical roles also get
-  // a penalty proportional to how far below they are.
+  // ── Build priority queue ──────────────────────────────────────
+  // Score = (ocLevel * 1000) + (roleTypePriority * 100) + delta
+  // Higher level always beats lower level for the same role quality.
+  // Within same level, critical roles (gate/bottleneck) are filled first.
+  // Within same criticality, higher delta wins.
   const queue = [];
   for (const member of memberPool) {
-    for (const oc of ocs) {
+    for (const oc of ocList) {
       const ocLevel = FLOWCHARTS[oc.ocName]?.level || 1;
       for (const role of (oc.openRoles || [])) {
-        const impact = impactMatrix[member.name]?.[oc.ocName]?.[role];
-        if (!impact) continue;
-
-        const rc = getRoleCPRRange(role);
-        let priorityScore = (ocLevel * 1000) + (roleTypePriority(impact.roleType) * 100) + impact.delta;
-
-        // Penalise no-CPR-data members on non-safe critical roles heavily —
-        // they should only fill a slot if nobody with known CPR is available.
-        if (impact.flag === 'no_data' && !rc.safe && impact.roleType !== 'safe') {
-          priorityScore -= 500;
-        }
-        // Penalise unknown CPR (member exists in DB but no data for this OC/role)
-        // on gate/bottleneck roles — less severe than no_data
-        if (impact.flag === 'cpr_unknown' && ['gate','bottleneck'].includes(impact.roleType)) {
-          priorityScore -= 200;
-        }
-
+        const impact = impactMatrix[member.name]?.[oc.ocId]?.[role];
+        if (!impact || impact.blocked) continue;
         queue.push({
-          member: member.name, memberStatus: member.status||'available',
-          ocName: oc.ocName, ocLevel, role,
-          roleType: impact.roleType, cpr: impact.cpr,
-          delta: impact.delta, flag: impact.flag,
-          priorityScore,
+          member:       member.name,
+          memberStatus: member.status || 'available',
+          ocName:       oc.ocName,
+          ocId:         oc.ocId,
+          ocLevel,
+          role,
+          roleType:      impact.roleType,
+          cpr:           impact.cpr,
+          delta:         impact.delta,
+          flag:          impact.flag,
+          priorityScore: (ocLevel * 1000) + (roleTypePriority(impact.roleType) * 100) + impact.delta,
         });
       }
     }
   }
-  queue.sort((a,b) => b.priorityScore - a.priorityScore);
+  queue.sort((a, b) => b.priorityScore - a.priorityScore);
 
-  // Greedy assignment
-  const usedMembers = new Set(), filledRoles = {}, assignments = {};
-  for (const item of queue) {
-    if (usedMembers.has(item.member) || filledRoles[item.ocName]?.[item.role]) continue;
-    if (!filledRoles[item.ocName]) filledRoles[item.ocName] = {};
-    if (!assignments[item.ocName]) assignments[item.ocName] = [];
-    filledRoles[item.ocName][item.role] = item.member;
-    assignments[item.ocName].push({role: item.role, member: item.member, memberStatus: item.memberStatus, cpr: item.cpr, roleType: item.roleType, roleColor: ROLE_COLORS[item.ocName]?.[item.role]||'yellow', impact: parseFloat(item.delta.toFixed(1)), flag: item.flag});
+  // ── Greedy assignment with viability gate ─────────────────────
+  //
+  // DUPLICATE OC DISPERSAL:
+  // For OCs with the same name (e.g. 5x Best of the Lot), we interleave
+  // critical role assignments across instances before filling non-critical.
+  // This prevents instance 0 from absorbing all top players.
+  //
+  // Algorithm:
+  //   Pass 1 — assign critical+gate roles across ALL instances, round-robin
+  //             by instance index within each OC name group.
+  //   Pass 2 — assign remaining (non-critical) roles with leftover members.
+  //   Pass 3 — viability check: if an instance can't reach breakeven, release
+  //             its members and mark it unfillable.
+
+  const usedMembers = new Set();
+  const filledRoles = {};   // { ocId: { role: memberName } }
+  const assignments = {};   // { ocId: [{ role, member, ... }] }
+
+  // Helper: attempt to assign an item
+  function tryAssign(item) {
+    if (usedMembers.has(item.member))           return false;
+    if (filledRoles[item.ocId]?.[item.role])    return false;
+    if (!filledRoles[item.ocId])  filledRoles[item.ocId] = {};
+    if (!assignments[item.ocId]) assignments[item.ocId]  = [];
+    filledRoles[item.ocId][item.role] = item.member;
+    assignments[item.ocId].push({
+      role:        item.role,
+      member:      item.member,
+      memberStatus: item.memberStatus,
+      cpr:         item.cpr,
+      roleType:    item.roleType,
+      roleColor:   ROLE_COLORS[item.ocName]?.[item.role] || 'yellow',
+      impact:      parseFloat(item.delta.toFixed(1)),
+      flag:        item.flag,
+    });
     usedMembers.add(item.member);
+    return true;
   }
 
-  // Score teams
-  const optimizedOCs = [];
-  for (const oc of ocs) {
-    const ocLevel = FLOWCHARTS[oc.ocName]?.level || 1;
-    const breakeven = SCOPE_BREAKEVEN[ocLevel] || 0.75;
-    const baseline  = simulateOC(oc.ocName, oc.filledCPRs || {});
-    const assembled = {...(oc.filledCPRs||{})};
-    (assignments[oc.ocName]||[]).forEach(a => { if (a.cpr !== null) assembled[a.role] = a.cpr; });
-    const projected = simulateOC(oc.ocName, assembled);
+  // Group queue entries by OC name for interleaving
+  const criticalByOCName = {};  // { ocName: [[items for inst0], [items for inst1], ...] }
+  const nonCritical = [];
+
+  for (const item of queue) {
+    const isCrit = ['gate','bottleneck'].includes(item.roleType);
+    if (isCrit) {
+      if (!criticalByOCName[item.ocName]) criticalByOCName[item.ocName] = {};
+      if (!criticalByOCName[item.ocName][item.ocId]) criticalByOCName[item.ocName][item.ocId] = [];
+      criticalByOCName[item.ocName][item.ocId].push(item);
+    } else {
+      nonCritical.push(item);
+    }
+  }
+
+  // Pass 1: interleave critical roles across duplicate instances
+  // For each OC name group, round-robin across instances picking best available
+  for (const [ocName, instanceMap] of Object.entries(criticalByOCName)) {
+    const instances = Object.values(instanceMap); // array of arrays, one per ocId
+    let progress = true;
+    while (progress) {
+      progress = false;
+      for (const instItems of instances) {
+        // Find the first unblocked, unassigned item for this instance
+        for (let i = 0; i < instItems.length; i++) {
+          const item = instItems[i];
+          if (filledRoles[item.ocId]?.[item.role]) break; // role already filled this instance
+          if (tryAssign(item)) { instItems.splice(i, 1); progress = true; break; }
+        }
+      }
+    }
+  }
+
+  // Pass 2: fill non-critical roles with remaining members
+  for (const item of nonCritical) {
+    tryAssign(item);
+  }
+
+  // Pass 3: viability check — simulate each assembled team.
+  // Use CONSERVATIVE simulation: unknown/stale CPR slots contribute absMin,
+  // not the 68% baseline, so we don't over-estimate success.
+  const unfillableOCIds = new Set();
+  const releasedMembers = new Set();
+
+  for (const oc of ocList) {
+    const ocLevel   = FLOWCHARTS[oc.ocName]?.level || 1;
+    const breakeven = (SCOPE_BREAKEVEN[ocLevel] || 0.75) * 100;
+
+    const assembledCPRs = { ...(oc.filledCPRs||{}) };
+    (assignments[oc.ocId]||[]).forEach(a => {
+      if (a.cpr !== null) {
+        assembledCPRs[a.role] = a.cpr;
+      } else {
+        // Conservative: unknown CPR contributes absMin for that role
+        const rc = getRoleCPRRange(a.role);
+        assembledCPRs[a.role] = rc.absMin;
+      }
+    });
+
+    const projected = simulateOC(oc.ocName, assembledCPRs);
     const projectedSC = projected?.successChance || 0;
-    const meta = OC_METADATA[oc.ocName] || {rewardType:'cash', maxPayout:0};
-    const emp  = empirical[oc.ocName];
-    const basis = (emp?.samples >= 5 ? emp.meanPayout : 0) || meta.maxPayout || (ocLevel * 1000000);
-    const lvlBonus = 1 + (ocLevel - 1) * 0.05;
-    const filledInOC = new Set((assignments[oc.ocName]||[]).map(a => a.role));
+
+    if (projectedSC < breakeven) {
+      // Not viable — release members back to the pool
+      unfillableOCIds.add(oc.ocId);
+      (assignments[oc.ocId]||[]).forEach(a => {
+        usedMembers.delete(a.member);
+        releasedMembers.add(a.member);
+      });
+      delete assignments[oc.ocId];
+      delete filledRoles[oc.ocId];
+    }
+  }
+
+  // Pass 4: try to use released members to fill remaining viable OCs
+  // (they might be able to help lower-level OCs that are close to breakeven)
+  if (releasedMembers.size > 0) {
+    for (const item of [...queue]) {
+      if (!releasedMembers.has(item.member)) continue;
+      if (unfillableOCIds.has(item.ocId))   continue;
+      tryAssign(item);
+    }
+  }
+
+  // ── Score final teams ─────────────────────────────────────────
+  const optimizedOCs = [];
+  for (const oc of ocList) {
+    const ocLevel   = FLOWCHARTS[oc.ocName]?.level || 1;
+    const breakeven = (SCOPE_BREAKEVEN[ocLevel] || 0.75) * 100;
+    const baseline  = simulateOC(oc.ocName, oc.filledCPRs || {});
+
+    if (unfillableOCIds.has(oc.ocId)) {
+      // Show as unfillable — no viable team could be assembled
+      optimizedOCs.push({
+        ocName:           oc.ocName, ocId: oc.ocId, level: ocLevel,
+        rewardType:       OC_METADATA[oc.ocName]?.rewardType || 'cash',
+        itemDesc:         OC_METADATA[oc.ocName]?.itemDesc   || '',
+        empiricalPayout:  null, empiricalSamples: 0,
+        projectedSuccess: 0, currentSuccess: baseline?.successChance || 0,
+        improvement:      0, scopeBreakeven: Math.round(breakeven),
+        status:           'unfillable',
+        team:             [],
+        unfilledRoles:    (oc.openRoles||[]).map(r => ({
+          role:     r,
+          roleType: roleClass[oc.ocName]?.[r] || 'support',
+          urgent:   ['gate','bottleneck'].includes(roleClass[oc.ocName]?.[r]),
+          reason:   'insufficient_qualified_members',
+        })),
+      });
+      continue;
+    }
+
+    // Conservative simulation for display (same logic as viability check)
+    const assembledCPRs = { ...(oc.filledCPRs||{}) };
+    (assignments[oc.ocId]||[]).forEach(a => {
+      assembledCPRs[a.role] = a.cpr !== null ? a.cpr : getRoleCPRRange(a.role).absMin;
+    });
+    const projected   = simulateOC(oc.ocName, assembledCPRs);
+    const projectedSC = projected?.successChance || 0;
+
+    const filledInOC    = new Set((assignments[oc.ocId]||[]).map(a => a.role));
     const unfilledRoles = (oc.openRoles||[]).filter(r => !filledInOC.has(r));
-    let status = projectedSC < breakeven*100-10 ? 'at_risk' : projectedSC < breakeven*100 ? 'marginal' : 'optimal';
+    const emp           = empirical[oc.ocName];
+    const status        = projectedSC < breakeven - 10 ? 'at_risk'
+                        : projectedSC < breakeven      ? 'marginal'
+                        : 'optimal';
+
     optimizedOCs.push({
-      ocName: oc.ocName, level: ocLevel,
-      rewardType: meta.rewardType, itemDesc: meta.itemDesc||'',
-      empiricalPayout: emp?.meanPayout || null, empiricalSamples: emp?.samples || 0,
-      projectedSuccess: projectedSC, currentSuccess: baseline?.successChance||0,
-      improvement: projectedSC - (baseline?.successChance||0),
-      scopeBreakeven: Math.round(breakeven*100), status,
-      team: assignments[oc.ocName] || [],
-      unfilledRoles: unfilledRoles.map(r => ({role:r, roleType: roleClassifications[oc.ocName]?.[r]||'support', urgent: ['gate','bottleneck'].includes(roleClassifications[oc.ocName]?.[r])})),
+      ocName:           oc.ocName, ocId: oc.ocId, level: ocLevel,
+      rewardType:       OC_METADATA[oc.ocName]?.rewardType || 'cash',
+      itemDesc:         OC_METADATA[oc.ocName]?.itemDesc   || '',
+      empiricalPayout:  emp?.meanPayout || null, empiricalSamples: emp?.samples || 0,
+      projectedSuccess: projectedSC,
+      currentSuccess:   baseline?.successChance || 0,
+      improvement:      projectedSC - (baseline?.successChance||0),
+      scopeBreakeven:   Math.round(breakeven),
+      status,
+      team:             assignments[oc.ocId] || [],
+      unfilledRoles:    unfilledRoles.map(r => ({
+        role:     r,
+        roleType: roleClass[oc.ocName]?.[r] || 'support',
+        urgent:   ['gate','bottleneck'].includes(roleClass[oc.ocName]?.[r]),
+      })),
     });
   }
-  optimizedOCs.sort((a,b) => b.level - a.level);
+  optimizedOCs.sort((a, b) => b.level - a.level);
 
-  // Suboptimal
+  // ── Suboptimal existing placements ───────────────────────────
   const suboptimalPlacements = [];
-  for (const oc of ocs) {
+  for (const oc of ocList) {
     for (const placement of (oc.existingPlacements||[])) {
       for (const optOC of optimizedOCs) {
         const better = optOC.team.find(a => a.member === placement.member);
         if (!better) continue;
         if (optOC.ocName === oc.ocName && better.role === placement.role) continue;
-        const currentImpact = impactMatrix[placement.member]?.[oc.ocName]?.[placement.role]?.delta || 0;
+        const currentImpact = impactMatrix[placement.member]?.[oc.ocId]?.[placement.role]?.delta || 0;
         const delta = (better.impact||0) - currentImpact;
-        if (delta > 5) { suboptimalPlacements.push({member: placement.member, currentOC: oc.ocName, currentRole: placement.role, currentCPR: placement.cpr, betterOC: optOC.ocName, betterRole: better.role, betterCPR: better.cpr, improvementDelta: parseFloat(delta.toFixed(1))}); }
+        if (delta > 5) suboptimalPlacements.push({
+          member: placement.member, currentOC: oc.ocName, currentRole: placement.role,
+          currentCPR: placement.cpr, betterOC: optOC.ocName, betterRole: better.role,
+          betterCPR: better.cpr, improvementDelta: parseFloat(delta.toFixed(1)),
+        });
         break;
       }
     }
   }
 
-  // Personal recommendation — find the best slot for this member.
-  // Uses the priority queue (sorted by level desc) but skips any slot
-  // already assigned to someone else in the greedy pass.
+  // ── Personal recommendation ───────────────────────────────────
+  // Best slot for the requesting member — either their assigned slot or
+  // the next best available slot if they weren't assigned anywhere.
+  // Always returned (even if already assigned) so members on member keys
+  // see their recommendation regardless of whether they can see all OCs.
   let personalRecommendation = null;
   if (requestingMember) {
-    const bestQueueEntry = queue.find(i =>
+    const bestEntry = queue.find(i =>
       i.member === requestingMember &&
-      !filledRoles[i.ocName]?.[i.role]   // slot not already taken
+      !unfillableOCIds.has(i.ocId) && (
+        !filledRoles[i.ocId]?.[i.role] ||
+        filledRoles[i.ocId][i.role] === requestingMember
+      )
     );
-
-    if (bestQueueEntry) {
-      const optOC = optimizedOCs.find(o => o.ocName === bestQueueEntry.ocName);
+    if (bestEntry) {
+      const optOC = optimizedOCs.find(o => o.ocId === bestEntry.ocId);
       personalRecommendation = {
         member:           requestingMember,
-        ocName:           bestQueueEntry.ocName,
-        level:            bestQueueEntry.ocLevel,
-        role:             bestQueueEntry.role,
-        cpr:              bestQueueEntry.cpr,
-        roleType:         bestQueueEntry.roleType,
+        ocName:           bestEntry.ocName,
+        level:            bestEntry.ocLevel,
+        role:             bestEntry.role,
+        cpr:              bestEntry.cpr,
+        roleType:         bestEntry.roleType,
         projectedSuccess: optOC?.projectedSuccess ?? null,
-        impact:           parseFloat(bestQueueEntry.delta.toFixed(1)),
-        flag:             bestQueueEntry.flag,
+        impact:           parseFloat(bestEntry.delta.toFixed(1)),
+        flag:             bestEntry.flag,
       };
     }
   }
 
   return {
     optimizedOCs, suboptimalPlacements, personalRecommendation,
-    unassignedMembers: memberPool.filter(m => !usedMembers.has(m.name)).map(m => ({name:m.name, status:m.status||'available', reason: m.status==='hospital' ? 'hospital' : 'no_slot_available'})),
-    meta: {membersConsidered: memberPool.length, ocsOptimized: ocs.length, assignmentsMade: usedMembers.size},
+    unassignedMembers: memberPool
+      .filter(m => !usedMembers.has(m.name))
+      .map(m => ({ name: m.name, status: m.status||'available', reason: m.status==='hospital' ? 'hospital' : 'no_slot_available' })),
+    meta: {
+      membersConsidered: memberPool.length,
+      ocsOptimized:      ocList.length,
+      assignmentsMade:   usedMembers.size,
+    },
   };
 }
 
@@ -708,7 +907,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'2.8.2', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'2.9.0', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -827,47 +1026,6 @@ app.get('/api/cpr', async (req, res) => {
     r.rows.forEach(row => { members[row.member_name] = {cprs:row.cprs, source:row.source, updatedAt:row.updated_at, isStale:isCPRStale(row.updated_at)}; });
     res.json({members, factionId});
   } catch(e) { res.status(500).json({error:'Failed to load CPR'}); }
-});
-
-app.post('/api/cpr/history', rateLimit('cpr_history'), async (req, res) => {
-  const key = req.headers['x-oca-key'] || req.query.key;
-  const owner = await validateKey(req, res); if (!owner) return;
-  if (!isLeaderKey(key)) return res.status(403).json({error:'Leader key required'});
-  const {records} = req.body;
-  if (!Array.isArray(records) || records.length === 0) return res.status(400).json({error:'records must be non-empty array'});
-  if (records.length > 500) return res.status(400).json({error:'Max 500 records'});
-  const factionId = getFactionId(key);
-  const byMember = {};
-  records.forEach(({memberName, ocName, role, cpr}) => {
-    if (!memberName || !ocName || !role || cpr === undefined) return;
-    const normName = normOCName(ocName);
-    if (!byMember[memberName]) byMember[memberName] = {};
-    if (!byMember[memberName][normName]) byMember[memberName][normName] = {};
-    const ex = byMember[memberName][normName][role];
-    if (ex === undefined || cpr > ex) byMember[memberName][normName][role] = cpr;
-  });
-  let updated = 0;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    for (const [memberName, cprs] of Object.entries(byMember)) {
-      await client.query(
-        `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
-         VALUES ($1,$2,'history',$3,NOW())
-         ON CONFLICT (faction_id, member_name)
-         DO UPDATE SET cprs = member_cpr.cprs||$3::jsonb, updated_at=NOW()`,
-        [factionId, memberName, JSON.stringify(cprs)]
-      );
-      updated++;
-    }
-    await client.query('COMMIT');
-    await invalidateCache(factionId);
-    res.json({ok:true, updated, recordsProcessed:records.length});
-  } catch(e) {
-    await client.query('ROLLBACK');
-    console.error('[CPR HISTORY] Error:', e.message);
-    res.status(500).json({error:'Failed to store history'});
-  } finally { client.release(); }
 });
 
 app.get('/api/cpr/status', async (req, res) => {
@@ -1037,7 +1195,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v2.8.2 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v2.9.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
