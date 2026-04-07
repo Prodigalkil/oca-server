@@ -531,6 +531,12 @@ function isCPRStale(updatedAt) { return !updatedAt || Date.now() - new Date(upda
 
 async function optimizeFaction(factionId, ocs, requestingMember) {
   // ── Load CPR from DB (TornStats only) ────────────────────────
+  let empirical = {};
+  try {
+    const er = await query(`SELECT oc_name, AVG(max_money)::BIGINT AS mean, COUNT(*) AS n FROM oc_payouts WHERE faction_id=$1 AND max_money>0 GROUP BY oc_name`, [factionId]);
+    er.rows.forEach(row => { empirical[row.oc_name] = { meanPayout: parseInt(row.mean), samples: parseInt(row.n) }; });
+  } catch(e) {}
+
   let memberCPRMap = {};
   try {
     const r = await query('SELECT member_name, source, cprs, updated_at FROM member_cpr WHERE faction_id=$1', [factionId]);
