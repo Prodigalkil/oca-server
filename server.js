@@ -539,11 +539,34 @@ function simulateOC(ocName, cprs) {
 function getMemberCPR(memberCPRs, memberName, ocName, role) {
   const d = memberCPRs[memberName]; if (!d) return null;
   const base = getRoleBase(role);
-  for (const variant of [ocName, ocName+'s', ocName.replace(/s$/,'')]) {
-    const ocData = d.cprs?.[variant]; if (!ocData) continue;
-    const cpr = ocData[role] ?? ocData[base] ?? null;
-    if (cpr !== null) return cpr;
+
+  // Candidate OC name variants to try:
+  // 1. Exact ocName (already normalised by optimizer e.g. "Cash Me If You Can")
+  // 2. normOCName applied to each DB key — handles mismatches like
+  //    DB "Cash Me if You Can" → normOCName → "Cash Me If You Can" ✓
+  //    DB "Guardian Ángels"    → normOCName → "Guardian Angels"    ✓
+  // Try exact match first for speed, then scan all keys with normalisation.
+  const tryKey = (key) => {
+    const ocData = d.cprs?.[key]; if (!ocData) return null;
+    return ocData[role] ?? ocData[base] ?? null;
+  };
+
+  // Fast path: exact key match
+  for (const variant of [ocName, ocName + 's', ocName.replace(/s$/, '')]) {
+    const r = tryKey(variant);
+    if (r !== null) return r;
   }
+
+  // Slow path: scan all stored OC keys, normalising each one
+  if (d.cprs) {
+    for (const storedKey of Object.keys(d.cprs)) {
+      if (normOCName(storedKey) === ocName) {
+        const r = tryKey(storedKey);
+        if (r !== null) return r;
+      }
+    }
+  }
+
   return null;
 }
 
@@ -716,6 +739,9 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
   }
 
   // Pass 2: viability check
+  // If an OC can't reach scope breakeven, release members from NON-SAFE roles
+  // so they can fill other OCs. Safe-role members stay assigned — they don't
+  // affect viability and are wasted elsewhere anyway.
   const unfillableOCIds = new Set();
   const releasedMembers = new Set();
 
@@ -725,12 +751,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 
     const assembledCPRs = { ...(oc.filledCPRs||{}) };
     (assignments[oc.ocId]||[]).forEach(a => {
-      if (a.cpr !== null) {
-        assembledCPRs[a.role] = a.cpr;
-      } else {
-        // Conservative: unknown CPR contributes absMin for that role
-        assembledCPRs[a.role] = getRoleCPRRange(a.role).absMin;
-      }
+      assembledCPRs[a.role] = a.cpr !== null ? a.cpr : getRoleCPRRange(a.role).absMin;
     });
 
     const projected   = simulateOC(oc.ocName, assembledCPRs);
@@ -738,12 +759,27 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 
     if (projectedSC < breakeven) {
       unfillableOCIds.add(oc.ocId);
+      // Only release members in non-safe roles — safe roles don't hurt viability
+      const retained = [];
       (assignments[oc.ocId]||[]).forEach(a => {
-        usedMembers.delete(a.member);
-        releasedMembers.add(a.member);
+        const ocsR = getOCSRole(oc.ocName, a.role);
+        const isSafe = ocsR?.safe ?? getRoleCPRRange(a.role).safe;
+        if (isSafe) {
+          retained.push(a); // keep safe-role members assigned
+        } else {
+          usedMembers.delete(a.member);
+          releasedMembers.add(a.member);
+        }
       });
-      delete assignments[oc.ocId];
-      delete filledRoles[oc.ocId];
+      // Rebuild assignments with only safe-role members retained
+      if (retained.length > 0) {
+        assignments[oc.ocId] = retained;
+        filledRoles[oc.ocId] = {};
+        retained.forEach(a => { filledRoles[oc.ocId][a.role] = a.member; });
+      } else {
+        delete assignments[oc.ocId];
+        delete filledRoles[oc.ocId];
+      }
     }
   }
 
@@ -886,7 +922,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'2.9.1', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'2.9.2', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
