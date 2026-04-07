@@ -792,6 +792,45 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     }
   }
 
+  // Pass 4: fill safe roles of unfillable OCs with ANY unassigned member.
+  // Safe roles (safe:true) accept everyone regardless of CPR — no_data, cpr_unknown,
+  // or even CPR of 1% — it doesn't matter. The OC can't reach breakeven regardless,
+  // but we still want to show which members should fill safe slots.
+  // We use the full member pool (not just released) and pick lowest-priority members
+  // so we don't pull anyone who could be useful elsewhere.
+  for (const oc of ocList) {
+    if (!unfillableOCIds.has(oc.ocId)) continue;
+    for (const role of (oc.openRoles || [])) {
+      const ocsR  = getOCSRole(oc.ocName, role);
+      const isSafe = ocsR?.safe ?? getRoleCPRRange(role).safe;
+      if (!isSafe) continue; // only fill safe slots here
+      if (filledRoles[oc.ocId]?.[role]) continue; // already filled
+
+      // Find any unassigned member — prefer those with lowest CPR for this role
+      // (save higher-CPR members for viable OCs)
+      const candidates = memberPool
+        .filter(m => !usedMembers.has(m.name))
+        .map(m => ({
+          member:       m.name,
+          memberStatus: m.status || 'available',
+          ocName:       oc.ocName,
+          ocId:         oc.ocId,
+          ocLevel:      FLOWCHARTS[oc.ocName]?.level || 1,
+          role,
+          roleType:     'safe',
+          cpr:          getMemberCPR(memberCPRMap, m.name, oc.ocName, role),
+          delta:        0,
+          flag:         !memberCPRMap[m.name] ? 'no_data' : null,
+          priorityScore: 0,
+        }))
+        .sort((a,b) => (a.cpr||0) - (b.cpr||0)); // lowest CPR first for safe slots
+
+      if (candidates.length > 0) {
+        tryAssign(candidates[0]);
+      }
+    }
+  }
+
   // ── Score final teams ─────────────────────────────────────────
   const optimizedOCs = [];
   for (const oc of ocList) {
@@ -800,7 +839,19 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     const baseline  = simulateOC(oc.ocName, oc.filledCPRs || {});
 
     if (unfillableOCIds.has(oc.ocId)) {
-      // Show as unfillable — no viable team could be assembled
+      // OC can't reach scope breakeven — but safe-role members may still be retained.
+      // Show them in the team so the leader can see who is assigned to safe slots.
+      const retainedTeam = (assignments[oc.ocId] || []).map(a => ({
+        role:         a.role,
+        member:       a.member,
+        memberStatus: a.memberStatus,
+        cpr:          a.cpr,
+        roleType:     a.roleType,
+        roleColor:    a.roleColor,
+        impact:       a.impact,
+        flag:         a.flag,
+      }));
+      const retainedRoles = new Set(retainedTeam.map(a => a.role));
       optimizedOCs.push({
         ocName:           oc.ocName, ocId: oc.ocId, level: ocLevel,
         rewardType:       OC_METADATA[oc.ocName]?.rewardType || 'cash',
@@ -809,13 +860,15 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         projectedSuccess: 0, currentSuccess: baseline?.successChance || 0,
         improvement:      0, scopeBreakeven: Math.round(breakeven),
         status:           'unfillable',
-        team:             [],
-        unfilledRoles:    (oc.openRoles||[]).map(r => ({
-          role:     r,
-          roleType: getOCSRole(oc.ocName, r)?.crit ? 'critical' : getOCSRole(oc.ocName, r)?.safe ? 'safe' : 'high-impact',
-          urgent:   getOCSRole(oc.ocName, r)?.crit ?? false,
-          reason:   'insufficient_qualified_members',
-        })),
+        team:             retainedTeam,
+        unfilledRoles:    (oc.openRoles||[])
+          .filter(r => !retainedRoles.has(r))
+          .map(r => ({
+            role:     r,
+            roleType: getOCSRole(oc.ocName, r)?.crit ? 'critical' : getOCSRole(oc.ocName, r)?.safe ? 'safe' : 'high-impact',
+            urgent:   getOCSRole(oc.ocName, r)?.crit ?? false,
+            reason:   'insufficient_qualified_members',
+          })),
       });
       continue;
     }
@@ -922,7 +975,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'2.9.2', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'2.9.3', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
