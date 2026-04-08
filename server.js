@@ -338,39 +338,305 @@ const ROLE_CPR_RANGES = {
   'Pickpocket': {idealMin:55, idealMax:74, absMin:48, overQual:85, safe:false},
 };
 
-// ── OCS_ROLES — authoritative role classification ──────────────
-// Ported directly from the original script. This is the source of truth
-// for blocking decisions and priority scoring. Server flowchart analysis
-// was producing incorrect classifications for many roles.
+// ── OCS_ROLES — authoritative role classification (three-tier system) ──────────
+// Derived from: CrimesHub simulator testing (all 22 available OCs, Apr 2026),
+// scoring engine DAG analysis, and 1-year faction history validation (373 OCs).
+//
+// tier:'CRITICAL'  — role has independent bad-end exposure; hard CPR floor enforced.
+//                    Member blocked if CPR < absMin. Optimizer strongly prefers ≥ idealMin.
+// tier:'IMPORTANT' — role affects success rate but has structural protection (recovery paths
+//                    or shared checkpoints). Gradient penalty applied below idealMin; absMin
+//                    is lenient to allow developing members through.
+// tier:'FREE'      — CPR has negligible impact on outcome (delta < 4% at L1-7, < 2% at L8+).
+//                    Any member accepted; no CPR check. CE development opportunity.
+//
+// absMin / idealMin are level-scaled:
+//   L1-2  CRIT 50/65  IMP 40/60
+//   L3-4  CRIT 55/68  IMP 45/62
+//   L5-6  CRIT 58/70  IMP 50/65
+//   L7    CRIT 60/72  IMP 52/66
+//   L8    CRIT 60/72  IMP 52/66
+//   L9-10 CRIT 62/74  IMP 55/68
+//
+// Goal: push members into higher OCs while maintaining acceptable success rates.
+// IMPORTANT roles have lenient absMin so developing members can participate.
+// CRITICAL roles enforce a floor to protect against bad ends.
+// FREE roles are left open so anyone can gain CE.
+
+const C  = (abs,idl) => ({ tier:'CRITICAL',  absMin:abs, idealMin:idl });
+const I  = (abs,idl) => ({ tier:'IMPORTANT', absMin:abs, idealMin:idl });
+const F  = ()        => ({ tier:'FREE',       absMin:0,   idealMin:0  });
+
 const OCS_ROLES = {
-  'First Aid and Abet':  { 'Picklock':{crit:false,safe:true},  'Pickpocket':{crit:false,safe:true},  'Decoy':{crit:false,safe:true} },
-  'Mob Mentality':       { 'Looter 1':{crit:false,safe:true},  'Looter 2':{crit:false,safe:true},    'Looter 3':{crit:false,safe:true},  'Looter 4':{crit:false,safe:true} },
-  'Cash Me If You Can':  { 'Lookout':{crit:false,safe:true},   'Thief 1':{crit:true,safe:false},     'Thief 2':{crit:true,safe:false} },
-  'Market Forces':       { 'Lookout':{crit:false,safe:true},   'Negotiator':{crit:true,safe:false},  'Enforcer':{crit:true,safe:false},   'Arsonist':{crit:false,safe:true},  'Muscle':{crit:false,safe:false} },
-  'Smoke and Wing Mirrors':{'Imitator':{crit:true,safe:false},  'Car Thief':{crit:true,safe:false},   'Hustler 1':{crit:false,safe:false}, 'Hustler 2':{crit:false,safe:true} },
-  'Gaslight the Way':    { 'Imitator 1':{crit:false,safe:false},'Imitator 2':{crit:true,safe:false},  'Imitator 3':{crit:true,safe:false}, 'Looter 2':{crit:false,safe:true},  'Looter 3':{crit:false,safe:true} },
-  'Stage Fright':        { 'Lookout':{crit:false,safe:true},   'Sniper':{crit:true,safe:false},      'Muscle 1':{crit:true,safe:false},   'Muscle 2':{crit:true,safe:false},  'Muscle 3':{crit:false,safe:false}, 'Enforcer':{crit:false,safe:false} },
-  'Snow Blind':          { 'Hustler':{crit:true,safe:false},   'Imitator':{crit:false,safe:false},   'Muscle 1':{crit:true,safe:false},   'Muscle 2':{crit:false,safe:true} },
-  'Plucking the Lotus Petal':{'Robber':{crit:true,safe:false}, 'Hustler':{crit:false,safe:false},    'Muscle':{crit:false,safe:false} },
-  'Guardian Angels':     { 'Hustler':{crit:true,safe:false},   'Engineer':{crit:true,safe:false},    'Enforcer':{crit:false,safe:false} },
-  'Counter Offer':       { 'Robber':{crit:true,safe:false},    'Engineer':{crit:true,safe:false},    'Hacker':{crit:false,safe:false},    'Picklock':{crit:false,safe:false}, 'Looter':{crit:false,safe:true} },
-  'No Reserve':          { 'Techie':{crit:true,safe:false},    'Engineer':{crit:true,safe:false},    'Car Thief':{crit:true,safe:false} },
-  'Honey Trap':          { 'Enforcer':{crit:true,safe:false},  'Muscle 1':{crit:true,safe:false},    'Muscle 2':{crit:false,safe:false} },
-  'Bidding War':         { 'Bomber 1':{crit:true,safe:false},  'Bomber 2':{crit:true,safe:false},    'Robber 1':{crit:true,safe:false},   'Robber 2':{crit:false,safe:false}, 'Robber 3':{crit:false,safe:false}, 'Driver':{crit:true,safe:false} },
-  'Leave No Trace':      { 'Techie':{crit:true,safe:false},    'Negotiator':{crit:true,safe:false},  'Imitator':{crit:false,safe:false} },
-  'Sneaky Git Grab':     { 'Imitator':{crit:false,safe:false}, 'Pickpocket':{crit:false,safe:false}, 'Techie':{crit:false,safe:false},    'Hacker':{crit:false,safe:false} },
-  'Blast from the Past': { 'Engineer':{crit:true,safe:false},  'Hacker':{crit:true,safe:false},      'Muscle':{crit:false,safe:false},    'Picklock':{crit:false,safe:false}, 'Bomber':{crit:true,safe:false} },
-  'Break the Bank':      { 'Muscle 1':{crit:true,safe:false},  'Muscle 2':{crit:false,safe:false},   'Muscle 3':{crit:false,safe:false},  'Thief 1':{crit:true,safe:false},   'Thief 2':{crit:false,safe:false}, 'Robber':{crit:false,safe:false} },
-  'Stacking the Deck':   { 'Cat Burglar':{crit:true,safe:false},'Driver':{crit:true,safe:false},     'Hacker':{crit:true,safe:false},     'Imitator':{crit:false,safe:false} },
-  'Ace in the Hole':     { 'Imitator':{crit:true,safe:false},  'Muscle 1':{crit:true,safe:false},   'Muscle 2':{crit:true,safe:false},   'Hacker':{crit:false,safe:false},   'Driver':{crit:false,safe:false} },
-  'Clinical Precision':  { 'Cat Burglar':{crit:true,safe:false},'Assassin':{crit:true,safe:false},   'Cleaner':{crit:false,safe:false},   'Imitator':{crit:false,safe:false} },
-  'Crane Reaction':      { 'Muscle 1':{crit:true,safe:false},  'Muscle 2':{crit:true,safe:false},   'Lookout':{crit:false,safe:false},   'Sniper':{crit:false,safe:false},   'Engineer':{crit:false,safe:false}, 'Bomber':{crit:false,safe:false}, 'Driver':{crit:false,safe:false} },
-  'Gone Fission':        { 'Hijacker':{crit:true,safe:false},  'Engineer':{crit:true,safe:false},   'Imitator':{crit:false,safe:false},  'Pickpocket':{crit:false,safe:false},'Bomber':{crit:false,safe:false} },
-  'Manifest Cruelty':    { 'Cat Burglar':{crit:true,safe:false},'Interrogator':{crit:true,safe:false},'Hacker':{crit:false,safe:false},   'Reviver':{crit:false,safe:false} },
-  'Best of the Lot':     { 'Picklock':{crit:true,safe:false},  'Muscle':{crit:false,safe:false},    'Imitator':{crit:false,safe:false},  'Car Thief':{crit:true,safe:false},  'Thief':{crit:true,safe:false} },
-  'Pet Project':         { 'Picklock':{crit:true,safe:false},  'Muscle':{crit:true,safe:false},     'Kidnapper':{crit:true,safe:false} },
-  'Window of Opportunity':{'Engineer':{crit:true,safe:false},  'Looter 1':{crit:false,safe:false},  'Looter 2':{crit:false,safe:false},  'Muscle 1':{crit:false,safe:false},  'Muscle 2':{crit:false,safe:false} },
+  // ── L1 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=50 idealMin=65  |  IMP: absMin=40 idealMin=60
+  'First Aid and Abet': {
+    'Decoy':      C(50,65),   // delta=39 — strongest real signal in 1yr dataset
+    'Pickpocket': C(50,65),   // delta=18.7 confirmed CRITICAL
+    'Picklock':   C(50,65),   // delta=7 moderate — CRITICAL given L1 stakes
+  },
+  'Mob Mentality': {
+    'Looter 1':   C(50,65),   // delta=10.09 CRITICAL confirmed
+    'Looter 2':   I(40,60),   // delta=7.52
+    'Looter 3':   I(40,60),   // delta=5.76
+    'Looter 4':   I(40,60),   // delta=5.60
+  },
+  'Pet Project': {
+    'Kidnapper':  C(50,65),   // score=100 dominant role; real delta=2.6 (RNG on strong)
+    'Picklock':   C(50,65),   // real delta=20.8 CRITICAL confirmed
+    'Muscle':     C(50,65),   // real delta=15.9 CRITICAL confirmed
+  },
+
+  // ── L2 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=50 idealMin=65  |  IMP: absMin=40 idealMin=60
+  'Best of the Lot': {
+    'Muscle':     C(50,65),   // score=100 dominant
+    'Imitator':   I(40,60),   // score=65.5
+    'Picklock':   F(),        // score=30.6 FREE
+    'Car Thief':  F(),        // score=5.7  FREE
+    'Thief':      F(),        // score=5.7  FREE
+  },
+  'Cash Me If You Can': {
+    'Thief 1':    C(50,65),   // delta=14.7 CRITICAL confirmed; real failAvg=60
+    'Thief 2':    C(50,65),   // delta=12.63 CRITICAL; real delta=2.0 (low CPRs still 65+)
+    'Lookout':    C(50,65),   // delta=11.46 CRITICAL; real failAvg=63.5
+  },
+
+  // ── L3 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=55 idealMin=68  |  IMP: absMin=45 idealMin=62
+  'Gaslight the Way': {
+    'Imitator 2': C(55,68),   // delta=13.19 CRITICAL confirmed
+    'Imitator 3': C(55,68),   // delta=15.23 CRITICAL confirmed
+    'Looter 3':   F(),        // delta=3.72 FREE
+    'Imitator 1': F(),        // delta=2.86 FREE
+    'Looter 1':   F(),        // delta=2.86 FREE
+    'Looter 2':   F(),        // delta=0.00 FREE confirmed
+  },
+  'Smoke and Wing Mirrors': {
+    'Car Thief':  C(55,68),   // delta=19.24 CRITICAL — biggest miss, now corrected
+    'Imitator':   C(55,68),   // delta=10.50 CRITICAL confirmed
+    'Hustler 2':  I(45,62),   // delta=7.11 IMPORTANT
+    'Hustler 1':  F(),        // delta=3.07 FREE
+  },
+  'Market Forces': {
+    'Enforcer':   I(45,62),   // delta=8.17 IMPORTANT (not CRITICAL — all roles shared)
+    'Muscle':     I(45,62),   // delta=7.02 IMPORTANT confirmed
+    'Negotiator': I(45,62),   // delta=7.58 IMPORTANT (was FREE — corrected)
+    'Lookout':    I(45,62),   // delta=5.64 IMPORTANT (was FREE — corrected)
+    'Arsonist':   F(),        // delta=1.22 FREE confirmed
+  },
+
+  // ── L4 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=55 idealMin=68  |  IMP: absMin=45 idealMin=62
+  'Snow Blind': {
+    'Hustler':    C(55,68),   // delta=17.79 CRITICAL confirmed
+    'Imitator':   C(55,68),   // delta=10.54 CRITICAL confirmed
+    'Muscle 1':   F(),        // delta=3.15 FREE confirmed
+    'Muscle 2':   F(),        // delta=3.15 FREE confirmed
+  },
+  'Stage Fright': {
+    'Sniper':     C(55,68),   // delta=13.57 CRITICAL confirmed; real failAvg=63
+    'Muscle 1':   I(45,62),   // delta=7.09 IMPORTANT (was FREE — corrected)
+    'Enforcer':   I(45,62),   // delta=5.47 IMPORTANT (was FREE — corrected)
+    'Lookout':    F(),        // delta=3.61 FREE
+    'Muscle 3':   F(),        // delta=3.07 FREE
+    'Muscle 2':   F(),        // delta=0.00 FREE confirmed by simulator
+    'Driver':     F(),        // not in simulator — score=4.8 FREE
+  },
+  'Plucking the Lotus Petal': {
+    'Hustler':    C(55,68),   // score=100 dominant role
+    'Muscle':     I(45,62),   // score=60.5
+    'Robber':     I(45,62),   // score=48.4
+  },
+
+  // ── L5 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=58 idealMin=70  |  IMP: absMin=50 idealMin=65
+  'No Reserve': {
+    'Techie':     C(58,70),   // delta=14.92 CRITICAL confirmed
+    'Engineer':   C(58,70),   // delta=12.32 CRITICAL confirmed
+    'Car Thief':  C(58,70),   // delta=12.16 CRITICAL (was FREE — major correction)
+  },
+  'Counter Offer': {
+    'Engineer':   I(50,65),   // delta=9.93 IMPORTANT (was FREE then CRITICAL — simulator correct)
+    'Robber':     I(50,65),   // delta=9.00 IMPORTANT
+    'Hacker':     I(50,65),   // delta=4.69 IMPORTANT confirmed
+    'Picklock':   F(),        // delta=3.11 FREE confirmed
+    'Looter':     F(),        // delta=3.91 FREE
+  },
+  'Honey Trap': {
+    'Muscle 2':   C(58,70),   // delta=13.03 CRITICAL (CrimesHub weight 42% — dominant)
+    'Muscle 1':   I(50,65),   // delta=9.84 IMPORTANT
+    'Enforcer':   I(50,65),   // delta=5.80 IMPORTANT confirmed
+  },
+  'Guardian Angels': {
+    'Hustler':    C(58,70),   // delta=13.61 CRITICAL confirmed; real failAvg=61
+    'Engineer':   C(58,70),   // delta=12.24 CRITICAL (was IMPORTANT — corrected)
+    'Enforcer':   C(58,70),   // delta=10.23 CRITICAL (was IMPORTANT — corrected)
+  },
+
+  // ── L6 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=58 idealMin=70  |  IMP: absMin=50 idealMin=65
+  'Bidding War': {
+    'Robber 3':   I(50,65),   // delta=9.73 IMPORTANT confirmed
+    'Driver':     I(50,65),   // delta=8.95 IMPORTANT (was CRITICAL — corrected)
+    'Robber 2':   I(50,65),   // delta=7.44 IMPORTANT (was CRITICAL — corrected)
+    'Bomber 2':   I(50,65),   // delta=5.69 IMPORTANT (was FREE — corrected)
+    'Bomber 1':   F(),        // delta=2.59 FREE
+    'Robber 1':   F(),        // delta=2.59 FREE
+  },
+  'Leave No Trace': {
+    'Imitator':   C(58,70),   // delta=15.44 CRITICAL; real failAvg=52.4 — strong confirmation
+    'Negotiator': I(50,65),   // delta=9.64 IMPORTANT (was CRITICAL — corrected)
+    'Techie':     I(50,65),   // delta=8.09 IMPORTANT; real delta=9.7 near-CRITICAL but keep IMP
+  },
+  'Sneaky Git Grab': {
+    'Pickpocket': C(58,70),   // delta=18.27 CRITICAL confirmed
+    'Hacker':     C(58,70),   // delta=10.12 CRITICAL (was FREE — major correction)
+    'Techie':     I(50,65),   // delta=9.04 IMPORTANT (was FREE); real delta=13 but n=2
+    'Imitator':   I(50,65),   // delta=6.56 IMPORTANT (was FREE — corrected)
+  },
+
+  // ── L7 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=60 idealMin=72  |  IMP: absMin=52 idealMin=66
+  'Blast from the Past': {
+    'Muscle':     I(52,66),   // delta=7.44 IMPORTANT (was CRITICAL — corrected for L7 baseline)
+    'Engineer':   I(52,66),   // delta=5.16 IMPORTANT confirmed
+    'Bomber':     I(52,66),   // delta=4.02 IMPORTANT (was FREE — corrected)
+    'Picklock 1': F(),        // delta=2.43 FREE
+    'Hacker':     F(),        // delta=1.76 FREE (was IMPORTANT — corrected)
+    'Picklock 2': F(),        // delta=0.45 FREE confirmed
+  },
+  'Window of Opportunity': {
+    'Engineer':   C(60,72),   // score=100 dominant — no simulator data, engine only
+    'Looter 2':   I(52,66),   // score=50.5
+    'Muscle 1':   I(52,66),   // score=41.6
+    'Muscle 2':   I(52,66),   // score=41.6
+    'Looter 1':   F(),        // score=13.4 FREE
+  },
+
+  // ── L8 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=60 idealMin=72  |  IMP: absMin=52 idealMin=66
+  'Break the Bank': {
+    'Muscle 3':   I(52,66),   // delta=5.99 IMPORTANT (was CRITICAL — L8 threshold corrected)
+    'Thief 2':    I(52,66),   // delta=5.99 IMPORTANT (was CRITICAL — corrected)
+    'Robber':     I(52,66),   // delta=2.14 IMPORTANT confirmed
+    'Muscle 1':   I(52,66),   // delta=2.12 IMPORTANT confirmed
+    'Muscle 2':   I(52,66),   // delta=2.05 IMPORTANT (was FREE — corrected)
+    'Thief 1':    F(),        // delta=0.32 FREE confirmed
+  },
+  'Clinical Precision': {
+    'Imitator':   C(60,72),   // delta=8.04 CRITICAL confirmed
+    'Cat Burglar': I(52,66),  // delta=4.42 IMPORTANT (was CRITICAL — corrected)
+    'Cleaner':    I(52,66),   // delta=4.37 IMPORTANT confirmed
+    'Assassin':   I(52,66),   // delta=2.92 IMPORTANT confirmed
+  },
+  'Stacking the Deck': {
+    'Imitator':   C(60,72),   // delta=8.04 CRITICAL confirmed
+    'Cat Burglar': I(52,66),  // delta=5.75 IMPORTANT (was CRITICAL — corrected)
+    'Hacker':     I(52,66),   // delta=5.10 IMPORTANT confirmed
+    'Driver':     F(),        // delta=0.88 FREE confirmed
+  },
+  'Manifest Cruelty': {
+    'Reviver':    C(60,72),   // delta=9.32 CRITICAL confirmed
+    'Interrogator':I(52,66),  // delta=5.22 IMPORTANT (was CRITICAL — corrected)
+    'Hacker':     I(52,66),   // delta=3.54 IMPORTANT confirmed
+    'Cat Burglar': I(52,66),  // delta=3.00 IMPORTANT confirmed
+  },
+
+  // ── L9 ──────────────────────────────────────────────────────────
+  // CRIT: absMin=62 idealMin=74  |  IMP: absMin=55 idealMin=68
+  'Ace in the Hole': {
+    'Hacker':     C(62,74),   // delta=7.76 CRITICAL confirmed
+    'Muscle 2':   I(55,68),   // delta=4.56 IMPORTANT (was CRITICAL — corrected)
+    'Imitator':   I(55,68),   // delta=3.95 IMPORTANT (was CRITICAL — corrected)
+    'Muscle 1':   I(55,68),   // delta=3.78 IMPORTANT (was CRITICAL — corrected)
+    'Driver':     I(55,68),   // delta=2.51 IMPORTANT confirmed
+  },
+  'Gone Fission': {
+    'Hijacker':   C(62,74),   // delta=6.11 CRITICAL confirmed
+    'Imitator':   I(55,68),   // delta=4.72 IMPORTANT confirmed
+    'Bomber':     I(55,68),   // delta=4.12 IMPORTANT confirmed
+    'Pickpocket': I(55,68),   // delta=4.05 IMPORTANT confirmed
+    'Engineer':   I(55,68),   // delta=4.03 IMPORTANT confirmed
+  },
+
+  // ── L10 ─────────────────────────────────────────────────────────
+  // CRIT: absMin=62 idealMin=74  |  IMP: absMin=55 idealMin=68
+  'Crane Reaction': {
+    'Sniper':     C(62,74),   // delta=8.06 CRITICAL confirmed
+    'Lookout':    I(55,68),   // delta=4.55 IMPORTANT confirmed
+    'Bomber':     I(55,68),   // delta=3.96 IMPORTANT (was CRITICAL — corrected)
+    'Muscle 1':   I(55,68),   // delta=2.49 IMPORTANT confirmed
+    'Engineer':   I(55,68),   // delta=2.31 IMPORTANT confirmed
+    'Muscle 2':   F(),        // delta=1.53 FREE (was IMPORTANT — corrected)
+  },
 };
+
+// ── OC_PATH_DATA — derived from full DAG analysis of all flowcharts ──────────
+// mainPath: the sequence of roles on the best-payout path (following 'pass' at every node).
+//   Used for path dependency detection: two consecutive weak members on the main
+//   path cause back-to-back checkpoint failures, which is the primary OC failure mode.
+//   (Community-confirmed by Andyman and Emforus independently.)
+//   Dual-role checkpoints are stored as "Role A+Role B".
+// roleWeights: normalized frequency of each role across the ENTIRE DAG (0–1).
+//   Higher = more checkpoints assigned to this role = more impact on success.
+//   This is the continuous weight system replacing the coarse 3/2/0 priority tiers.
+//   Derived from Allenone's regression data: role frequency ∝ slope of CPR→success curve.
+const OC_PATH_DATA = {
+  'Mob Mentality':           {level:1, mainPath:['Looter 1','Looter 2','Looter 3','Looter 2','Looter 4','Looter 2'], roleWeights:{'Looter 2':0.333,'Looter 1':0.222,'Looter 3':0.222,'Looter 4':0.222}},
+  'Pet Project':             {level:1, mainPath:['Picklock','Kidnapper','Kidnapper','Muscle','Kidnapper','Muscle','Picklock'], roleWeights:{'Muscle':0.45,'Kidnapper':0.3,'Picklock':0.25}},
+  'First Aid and Abet':      {level:1, mainPath:['Decoy','Picklock','Pickpocket'], roleWeights:{'Picklock':0.4,'Pickpocket':0.4,'Decoy':0.2}},
+  'Best of the Lot':         {level:2, mainPath:['Picklock','Imitator','Car Thief+Thief','Picklock','Muscle'], roleWeights:{'Muscle':0.375,'Imitator':0.312,'Picklock':0.188,'Car Thief':0.062,'Thief':0.062}},
+  'Cash Me If You Can':      {level:2, mainPath:['Thief 1','Thief 2','Thief 1','Thief 2','Lookout','Thief 2'], roleWeights:{'Thief 1':0.529,'Thief 2':0.353,'Lookout':0.118}},
+  'Gaslight the Way':        {level:3, mainPath:['Imitator 1+Looter 1','Imitator 2','Imitator 3','Looter 3','Looter 2+Looter 3','Imitator 2'], roleWeights:{'Imitator 2':0.235,'Looter 3':0.235,'Imitator 1':0.176,'Looter 1':0.176,'Imitator 3':0.118,'Looter 2':0.059}},
+  'Smoke and Wing Mirrors':  {level:3, mainPath:['Imitator','Imitator','Car Thief+Thief','Hustler 1+Hustler 2','Car Thief+Thief','Hustler 1'], roleWeights:{'Car Thief':0.259,'Thief':0.259,'Imitator':0.222,'Hustler 2':0.148,'Hustler 1':0.111}},
+  'Market Forces':           {level:3, mainPath:['Lookout','Negotiator','Enforcer','Arsonist','Muscle','Negotiator','Muscle'], roleWeights:{'Muscle':0.263,'Negotiator':0.211,'Enforcer':0.211,'Lookout':0.158,'Arsonist':0.158}},
+  'Snow Blind':              {level:4, mainPath:['Muscle 1+Muscle 2','Hustler','Imitator','Hustler','Hustler','Imitator','Imitator'], roleWeights:{'Hustler':0.318,'Muscle 1':0.227,'Muscle 2':0.227,'Imitator':0.227}},
+  'Stage Fright':            {level:4, mainPath:['Lookout+Muscle 2','Sniper','Muscle 1+Muscle 3','Enforcer','Lookout+Sniper'], roleWeights:{'Sniper':0.25,'Muscle 1':0.2,'Enforcer':0.15,'Lookout':0.15,'Muscle 2':0.1,'Muscle 3':0.1,'Driver':0.05}},
+  'Plucking the Lotus Petal':{level:4, mainPath:['Muscle','Hustler','Robber','Robber'], roleWeights:{'Hustler':0.375,'Robber':0.375,'Muscle':0.25}},
+  'No Reserve':              {level:5, mainPath:['Techie','Techie','Techie','Car Thief+Thief','Engineer','Techie'], roleWeights:{'Techie':0.421,'Engineer':0.263,'Car Thief':0.158,'Thief':0.158}},
+  'Counter Offer':           {level:5, mainPath:['Robber','Engineer','Hacker','Picklock','Looter'], roleWeights:{'Hacker':0.273,'Picklock':0.273,'Robber':0.182,'Engineer':0.182,'Looter':0.091}},
+  'Honey Trap':              {level:5, mainPath:['Enforcer','Muscle 1','Enforcer','Enforcer','Muscle 2','Muscle 1+Muscle 2','Enforcer+Muscle 1'], roleWeights:{'Muscle 2':0.455,'Muscle 1':0.318,'Enforcer':0.227}},
+  'Guardian Angels':         {level:5, mainPath:['Hustler','Engineer','Enforcer','Engineer','Hustler','Enforcer'], roleWeights:{'Enforcer':0.435,'Engineer':0.304,'Hustler':0.261}},
+  'Bidding War':             {level:6, mainPath:['Bomber 1','Driver','Robber 1','Robber 3','Robber 3','Driver+Robber 3','Bomber 2'], roleWeights:{'Driver':0.238,'Robber 2':0.19,'Bomber 1':0.143,'Robber 1':0.143,'Robber 3':0.143,'Bomber 2':0.143}},
+  'Leave No Trace':          {level:6, mainPath:['Techie','Negotiator','Imitator','Imitator','Techie','Imitator+Negotiator'], roleWeights:{'Negotiator':0.4,'Imitator':0.35,'Techie':0.25}},
+  'Sneaky Git Grab':         {level:6, mainPath:['Imitator','Pickpocket','Pickpocket+Imitator','Techie','Hacker','Techie','Imitator'], roleWeights:{'Imitator':0.316,'Pickpocket':0.316,'Hacker':0.211,'Techie':0.158}},
+  'Blast from the Past':     {level:7, mainPath:['Muscle','Hacker','Muscle','Engineer','Bomber','Picklock 2','Picklock 1','Hacker'], roleWeights:{'Hacker':0.2,'Picklock 2':0.2,'Picklock 1':0.2,'Muscle':0.16,'Engineer':0.16,'Bomber':0.08}},
+  'Window of Opportunity':   {level:7, mainPath:['Engineer','Muscle 1+Muscle 2','Looter 1','Looter 2','Muscle 1+Muscle 2'], roleWeights:{'Muscle 1':0.286,'Muscle 2':0.286,'Engineer':0.214,'Looter 2':0.143,'Looter 1':0.071}},
+  'Break the Bank':          {level:8, mainPath:['Robber+Muscle 1','Muscle 2+Thief 1','Muscle 3','Thief 2','Muscle 3','Robber+Muscle 1','Robber+Muscle 1','Robber+Thief 1'], roleWeights:{'Muscle 3':0.214,'Muscle 1':0.214,'Robber':0.214,'Thief 2':0.143,'Muscle 2':0.107,'Thief 1':0.107}},
+  'Clinical Precision':      {level:8, mainPath:['Cat Burglar','Assassin','Cleaner','Cleaner','Assassin+Imitator','Assassin','Assassin+Cleaner'], roleWeights:{'Assassin':0.321,'Cleaner':0.321,'Cat Burglar':0.179,'Imitator':0.179}},
+  'Stacking the Deck':       {level:8, mainPath:['Cat Burglar','Driver','Cat Burglar','Hacker','Hacker','Imitator'], roleWeights:{'Imitator':0.412,'Hacker':0.294,'Cat Burglar':0.176,'Driver':0.118}},
+  'Manifest Cruelty':        {level:8, mainPath:['Cat Burglar+Interrogator','Interrogator','Cat Burglar','Hacker','Interrogator+Reviver','Hacker','Interrogator'], roleWeights:{'Reviver':0.312,'Interrogator':0.281,'Hacker':0.219,'Cat Burglar':0.188}},
+  'Ace in the Hole':         {level:9, mainPath:['Imitator','Muscle 1+Muscle 2','Hacker','Muscle 1+Muscle 2','Driver','Hacker','Imitator'], roleWeights:{'Hacker':0.25,'Muscle 2':0.25,'Muscle 1':0.225,'Imitator':0.15,'Driver':0.125}},
+  'Gone Fission':            {level:9, mainPath:['Hijacker','Hijacker','Engineer','Imitator','Pickpocket+Imitator','Bomber','Imitator'], roleWeights:{'Hijacker':0.208,'Engineer':0.208,'Imitator':0.208,'Bomber':0.208,'Pickpocket':0.167}},
+  'Crane Reaction':          {level:10,mainPath:['Muscle 1+Muscle 2','Engineer+Lookout','Bomber','Engineer+Bomber','Lookout+Sniper','Muscle 2+Muscle 1'], roleWeights:{'Bomber':0.179,'Muscle 2':0.179,'Sniper':0.179,'Lookout':0.154,'Muscle 1':0.154,'Engineer':0.128,'Driver':0.026}},
+};
+
+// Get the DAG role weight for a specific role in a specific OC.
+// Falls back to tier-based weight if OC not in table.
+function getOCRoleWeight(ocName, role) {
+  const pd = OC_PATH_DATA[ocName];
+  if (!pd) return null;
+  const base = (role||'').replace(/\s+\d+$/,'');
+  return pd.roleWeights[role] ?? pd.roleWeights[base] ?? null;
+}
+
+// Extract the main-path role sequence for an OC (single roles only, no dual-role strings).
+// Used for consecutive-weakness path penalty detection.
+function getMainPathRoles(ocName) {
+  const pd = OC_PATH_DATA[ocName];
+  if (!pd) return [];
+  const roles = [];
+  for (const step of pd.mainPath) {
+    // Dual-role steps like "Enforcer+Muscle 1" — add both
+    if (step.includes('+')) {
+      step.split('+').forEach(r => roles.push(r.trim()));
+    } else {
+      roles.push(step);
+    }
+  }
+  return roles;
+}
 
 function getOCSRole(ocName, role) {
   const d = OCS_ROLES[ocName];
@@ -379,13 +645,13 @@ function getOCSRole(ocName, role) {
   return d[role] || d[base] || null;
 }
 
-// Role priority for queue scoring: critical > high-impact > safe
+// Role priority for queue scoring: CRITICAL > IMPORTANT > FREE
 function ocsRolePriority(ocName, role) {
   const r = getOCSRole(ocName, role);
-  if (!r)          return 1;  // unknown — treat as high-impact
-  if (r.crit)      return 3;  // critical
-  if (!r.safe)     return 2;  // high-impact / safe-ish
-  return 0;                   // safe/junk — lowest priority
+  if (!r)                     return 1;   // unknown — treat as important
+  if (r.tier === 'CRITICAL')  return 3;
+  if (r.tier === 'IMPORTANT') return 2;
+  return 0;                               // FREE — lowest priority
 }
 
 function getRoleBase(role) { return (role||'').replace(/\s+\d+$/,''); }
@@ -574,7 +840,7 @@ const STALE_MS = 7 * 24 * 60 * 60 * 1000;
 function isCPRStale(updatedAt) { return !updatedAt || Date.now() - new Date(updatedAt).getTime() > STALE_MS; }
 
 async function optimizeFaction(factionId, ocs, requestingMember) {
-  // ── Load CPR from DB (TornStats only) ────────────────────────
+  // ── Load data ─────────────────────────────────────────────────
   let empirical = {};
   try {
     const er = await query(`SELECT oc_name, AVG(max_money)::BIGINT AS mean, COUNT(*) AS n FROM oc_payouts WHERE faction_id=$1 AND max_money>0 GROUP BY oc_name`, [factionId]);
@@ -586,26 +852,120 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     const r = await query('SELECT member_name, source, cprs, updated_at FROM member_cpr WHERE faction_id=$1', [factionId]);
     r.rows.forEach(row => {
       memberCPRMap[row.member_name] = {
-        cprs:      row.cprs,
-        source:    row.source,
-        updatedAt: row.updated_at,
-        isStale:   isCPRStale(row.updated_at),
+        cprs: row.cprs, source: row.source,
+        updatedAt: row.updated_at, isStale: isCPRStale(row.updated_at),
       };
     });
   } catch(e) { console.error('[OPTIMIZE] CPR load error:', e.message); }
 
-  // ── Tag each OC instance with a unique ID ────────────────────
-  // Duplicate OC names (5x Best of the Lot) each get ocId = "Name__0", "Name__1" etc.
-  const ocList = ocs.map((oc, idx) => ({ ...oc, ocId: `${oc.ocName}__${idx}` }));
-
+  const ocList    = ocs.map((oc, idx) => ({ ...oc, ocId: `${oc.ocName}__${idx}` }));
   const memberPool = ocList[0]?.availableMembers || [];
 
+  // ══════════════════════════════════════════════════════════════
+  // IMPROVEMENT 1 — Continuous role weight priority score
+  // ──────────────────────────────────────────────────────────────
+  // Old system: coarse 3/2/0 tiers (critical / high-impact / safe).
+  // New system: normalized DAG frequency weight per role per OC.
+  //   weight = (times this role appears in DAG) / (total role appearances)
+  //   Range: 0.05–0.53. Scaled to 0–300 for priority score.
+  //   Source: Allenone's regression data — slope of CPR→success = role frequency.
+  // ══════════════════════════════════════════════════════════════
+  function computeRolePriorityScore(ocName, role) {
+    const ocsR = getOCSRole(ocName, role);
+    if (ocsR?.tier === 'FREE') return 0; // FREE slots always lowest priority
+
+    // Try DAG weight first — continuous score
+    const dagWeight = getOCRoleWeight(ocName, role);
+    if (dagWeight !== null) {
+      return Math.round(dagWeight * 600);
+    }
+    // Fallback: tier-based if OC not in table
+    if (ocsR?.tier === 'CRITICAL')  return 200;
+    if (ocsR?.tier === 'IMPORTANT') return 100;
+    return 100;
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // IMPROVEMENT 2 — idealMin gradient penalty on CRITICAL roles
+  // ──────────────────────────────────────────────────────────────
+  // Old: hard block at absMin only. A member at 53% (just above absMin 52%)
+  //   was treated the same as a member at 73% in queue ordering except delta.
+  // New: members between absMin and idealMin on CRITICAL roles get their
+  //   priority score penalised. They're still allowed (not blocked), but they
+  //   rank much lower so better members are preferred.
+  // Community confirmed: "lower than 65 needs two green members to carry them."
+  // ══════════════════════════════════════════════════════════════
+  function applyIdealMinPenalty(priorityScore, cpr, role, ocName) {
+    const ocsR = getOCSRole(ocName, role);
+    const tier = ocsR?.tier;
+    if (!tier || tier === 'FREE' || cpr === null) return priorityScore;
+    // Use per-role absMin/idealMin from OCS_ROLES if present, else ROLE_CPR_RANGES
+    const absMin  = ocsR.absMin  ?? getRoleCPRRange(role).absMin;
+    const idealMin = ocsR.idealMin ?? getRoleCPRRange(role).idealMin;
+    if (cpr >= idealMin) return priorityScore; // at or above ideal — no penalty
+    if (cpr < absMin)    return priorityScore; // blocked elsewhere — irrelevant
+    // In the absMin–idealMin gap: apply graduated penalty
+    // CRITICAL: up to 60% penalty. IMPORTANT: up to 40% penalty (more lenient).
+    const gap         = idealMin - absMin;
+    const shortfall   = idealMin - cpr;
+    const maxPenalty  = tier === 'CRITICAL' ? 0.60 : 0.40;
+    const penaltyFrac = (shortfall / gap) * maxPenalty;
+    return Math.round(priorityScore * (1 - penaltyFrac));
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // IMPROVEMENT 3 — Path dependency penalty
+  // ──────────────────────────────────────────────────────────────
+  // Community confirmed by Andyman: "back-to-back checkpoint fails on the
+  //   same branch cause failure." Our flowchart data confirms the mechanism.
+  // This function checks: if a proposed lineup has two consecutive roles on
+  //   the main path both below idealMin, it penalises the second assignment.
+  // Called AFTER Pass 1 to re-score the queue for subsequent passes.
+  // ══════════════════════════════════════════════════════════════
+  function computePathPenalty(ocName, role, currentAssignments, memberCPRMap) {
+    const mainPath = getMainPathRoles(ocName);
+    if (mainPath.length === 0) return 0;
+
+    const rc     = getRoleCPRRange(role);
+    const base   = (role||'').replace(/\s+\d+$/,'');
+
+    // Find this role's position(s) in the main path
+    const roleIdx = mainPath.reduce((idxs, r, i) => {
+      if (r === role || r === base) idxs.push(i);
+      return idxs;
+    }, []);
+    if (roleIdx.length === 0) return 0;
+
+    // Check whether any adjacent main-path role is already assigned weakly
+    let penalty = 0;
+    for (const idx of roleIdx) {
+      // Check predecessor and successor on main path
+      for (const neighborIdx of [idx - 1, idx + 1]) {
+        if (neighborIdx < 0 || neighborIdx >= mainPath.length) continue;
+        const neighborRole = mainPath[neighborIdx];
+        if (!neighborRole || neighborRole.includes('+')) continue;
+
+        // Find who is assigned to this neighbor role
+        const neighborAssignment = (currentAssignments||[]).find(a => {
+          const aBase = (a.role||'').replace(/\s+\d+$/,'');
+          return a.role === neighborRole || aBase === neighborRole;
+        });
+        if (!neighborAssignment) continue;
+
+        const neighborCPR = neighborAssignment.cpr;
+        const neighborRc  = getRoleCPRRange(neighborRole);
+        if (neighborCPR !== null && neighborCPR < neighborRc.idealMin) {
+          // Neighbor is already weak — penalise placing another weak member adjacent
+          // Penalty scales with how far below idealMin both members are
+          const neighborShortfall = neighborRc.idealMin - neighborCPR;
+          penalty += neighborShortfall * 8; // 8 pts per CPR point of shortfall
+        }
+      }
+    }
+    return penalty;
+  }
+
   // ── Build impact matrix ───────────────────────────────────────
-  // Blocking rules based on OCS_ROLES (authoritative from original script):
-  //   safe:true  → accept ANY member, any CPR, never block
-  //   crit:false → HIGH-IMPACT/SAFE-ISH → accept if known CPR ≥ absMin
-  //                OR if cpr_unknown (fill with absMin for conservative sim)
-  //   crit:true  → CRITICAL → require known CPR ≥ absMin, block otherwise
   const impactMatrix = {};
   for (const member of memberPool) {
     impactMatrix[member.name] = {};
@@ -615,10 +975,12 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
       if (!baseline) continue;
 
       for (const role of (oc.openRoles || [])) {
-        const rc       = getRoleCPRRange(role);
         const ocsRole  = getOCSRole(oc.ocName, role);
-        const isSafe   = ocsRole?.safe  ?? rc.safe;
-        const isCrit   = ocsRole?.crit  ?? false;
+        const tier     = ocsRole?.tier ?? 'IMPORTANT'; // default to IMPORTANT if unknown
+        const isFree   = tier === 'FREE';
+        const isCrit   = tier === 'CRITICAL';
+        // Use per-role CPR floors from OCS_ROLES, fallback to global ROLE_CPR_RANGES
+        const absMin   = isFree ? 0 : (ocsRole?.absMin ?? getRoleCPRRange(role).absMin);
 
         let cpr  = getMemberCPR(memberCPRMap, member.name, oc.ocName, role);
         let flag = null;
@@ -627,43 +989,31 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         else if (memberCPRMap[member.name].isStale) flag = 'cpr_stale';
 
         // ── BLOCKING RULES ───────────────────────────────────────
-        if (isSafe) {
-          // Safe/junk roles: accept everyone, CPR irrelevant
-          // effectiveCPR = actual if known, else 50 (doesn't matter much)
+        if (isFree) {
+          // FREE slots: accept everyone, CPR irrelevant
         } else if (isCrit) {
-          // Critical roles: must have known CPR ≥ absMin
+          // CRITICAL roles: must have known CPR ≥ absMin
           if (flag === 'no_data' || flag === 'cpr_unknown') {
             impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
             continue;
           }
-          if (cpr !== null && cpr < rc.absMin) {
+          if (cpr !== null && cpr < absMin) {
             impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, ocsRole, blocked: true };
             continue;
           }
         } else {
-          // High-impact / safe-ish: accept if known CPR ≥ absMin OR cpr_unknown (use absMin conservatively)
-          // Block only if completely unknown to faction (no_data) OR known but below absMin
+          // IMPORTANT roles: accept if known CPR ≥ absMin; block no_data
           if (flag === 'no_data') {
             impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
             continue;
           }
-          if (cpr !== null && cpr < rc.absMin) {
+          if (cpr !== null && cpr < absMin) {
             impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, ocsRole, blocked: true };
             continue;
           }
-          // cpr_unknown on non-critical: allow, use absMin for conservative simulation
         }
 
-        // Effective CPR for simulation
-        let effectiveCPR;
-        if (cpr !== null) {
-          effectiveCPR = cpr;
-        } else if (isSafe) {
-          effectiveCPR = 50;
-        } else {
-          // cpr_unknown on non-critical high-impact role — use absMin conservatively
-          effectiveCPR = rc.absMin;
-        }
+        let effectiveCPR = cpr !== null ? cpr : isFree ? 50 : absMin;
 
         const withMember = simulateOC(oc.ocName, { ...(oc.filledCPRs||{}), [role]: effectiveCPR });
         const delta = withMember ? withMember.successChance - baseline.successChance : 0;
@@ -673,11 +1023,11 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     }
   }
 
-  // ── Build priority queue ──────────────────────────────────────
-  // Score = (ocLevel * 1000) + (ocsRolePriority * 100) + delta
-  // Higher level always beats lower level.
-  // Within same level, critical roles (3) > high-impact (2) > safe (0).
-  // Within same criticality, higher CPR delta wins.
+  // ── Build priority queue with new scoring ────────────────────
+  // Score = (ocLevel * 1000)             — higher level always wins globally
+  //       + computeRolePriorityScore()   — continuous DAG weight (replaces 3/2/0)
+  //       + applyIdealMinPenalty()       — penalise below-idealMin on CRITICAL
+  //       + (delta * 10)                 — flowchart simulation delta as tiebreaker
   const queue = [];
   for (const member of memberPool) {
     for (const oc of ocList) {
@@ -685,63 +1035,70 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
       for (const role of (oc.openRoles || [])) {
         const impact = impactMatrix[member.name]?.[oc.ocId]?.[role];
         if (!impact || impact.blocked) continue;
-        const rolePri = ocsRolePriority(oc.ocName, role);
+
+        const baseRolePri = computeRolePriorityScore(oc.ocName, role);
+        const penalised   = applyIdealMinPenalty(baseRolePri, impact.cpr, role, oc.ocName);
+
         queue.push({
-          member:       member.name,
-          memberStatus: member.status || 'available',
-          ocName:       oc.ocName,
-          ocId:         oc.ocId,
+          member:        member.name,
+          memberStatus:  member.status || 'available',
+          ocName:        oc.ocName,
+          ocId:          oc.ocId,
           ocLevel,
           role,
-          roleType:      impact.ocsRole?.crit ? 'critical' : impact.ocsRole?.safe ? 'safe' : 'high-impact',
+          roleType:      impact.ocsRole?.tier === 'CRITICAL' ? 'critical' : impact.ocsRole?.tier === 'FREE' ? 'free' : 'important',
           cpr:           impact.cpr,
           delta:         impact.delta,
           flag:          impact.flag,
-          priorityScore: (ocLevel * 1000) + (rolePri * 100) + impact.delta,
+          basePri:       baseRolePri,
+          priorityScore: (ocLevel * 1000) + penalised + (impact.delta * 10),
         });
       }
     }
   }
   queue.sort((a, b) => b.priorityScore - a.priorityScore);
 
-  // ── Single greedy assignment pass ────────────────────────────
-  // The priority queue is already sorted correctly:
-  // (ocLevel * 1000) ensures higher-level OCs always get served first.
-  // Within same level, critical roles beat high-impact beat safe.
-  // Each member used at most once globally.
-  // filledRoles keyed by ocId — duplicate OC instances get independent teams.
+  // ── Pass 1: greedy assignment ─────────────────────────────────
   const usedMembers = new Set();
   const filledRoles = {};
   const assignments = {};
 
   function tryAssign(item) {
-    if (usedMembers.has(item.member))           return false;
-    if (filledRoles[item.ocId]?.[item.role])    return false;
+    if (usedMembers.has(item.member))        return false;
+    if (filledRoles[item.ocId]?.[item.role]) return false;
     if (!filledRoles[item.ocId])  filledRoles[item.ocId] = {};
     if (!assignments[item.ocId]) assignments[item.ocId]  = [];
     filledRoles[item.ocId][item.role] = item.member;
     assignments[item.ocId].push({
-      role:         item.role,
-      member:       item.member,
-      memberStatus: item.memberStatus,
-      cpr:          item.cpr,
-      roleType:     item.roleType,
-      roleColor:    ROLE_COLORS[item.ocName]?.[item.role] || 'yellow',
-      impact:       parseFloat(item.delta.toFixed(1)),
-      flag:         item.flag,
+      role: item.role, member: item.member, memberStatus: item.memberStatus,
+      cpr: item.cpr, roleType: item.roleType,
+      roleColor: ROLE_COLORS[item.ocName]?.[item.role] || 'yellow',
+      impact: parseFloat(item.delta.toFixed(1)), flag: item.flag,
     });
     usedMembers.add(item.member);
     return true;
   }
 
-  for (const item of queue) {
-    tryAssign(item);
-  }
+  for (const item of queue) { tryAssign(item); }
 
-  // Pass 2: viability check
-  // If an OC can't reach scope breakeven, release members from NON-SAFE roles
-  // so they can fill other OCs. Safe-role members stay assigned — they don't
-  // affect viability and are wasted elsewhere anyway.
+  // ── Pass 1b: path-penalty re-sort ────────────────────────────
+  // After the first greedy pass, we know who was assigned to each OC.
+  // Re-score remaining queue items using path dependency data from assignments
+  // so that subsequent passes don't stack weak members on the same branch.
+  for (const item of queue) {
+    if (usedMembers.has(item.member)) continue; // already assigned
+    if (!item.cpr || item.cpr === null) continue;
+    const ocsR    = getOCSRole(item.ocName, item.role);
+    const idealMin = ocsR?.idealMin ?? getRoleCPRRange(item.role).idealMin;
+    if (item.cpr >= idealMin) continue; // strong enough — no path concern
+    const pathPenalty = computePathPenalty(item.ocName, item.role, assignments[item.ocId], memberCPRMap);
+    if (pathPenalty > 0) {
+      item.priorityScore = Math.max(0, item.priorityScore - pathPenalty);
+    }
+  }
+  queue.sort((a, b) => b.priorityScore - a.priorityScore);
+
+  // ── Pass 2: viability check ───────────────────────────────────
   const unfillableOCIds = new Set();
   const releasedMembers = new Set();
 
@@ -751,27 +1108,24 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 
     const assembledCPRs = { ...(oc.filledCPRs||{}) };
     (assignments[oc.ocId]||[]).forEach(a => {
-      assembledCPRs[a.role] = a.cpr !== null ? a.cpr : getRoleCPRRange(a.role).absMin;
+      assembledCPRs[a.role] = a.cpr !== null ? a.cpr : (getOCSRole(oc.ocName, a.role)?.absMin ?? getRoleCPRRange(a.role).absMin);
     });
 
-    const projected   = simulateOC(oc.ocName, assembledCPRs);
-    const projectedSC = projected?.successChance || 0;
+    const projectedSC = simulateOC(oc.ocName, assembledCPRs)?.successChance || 0;
 
     if (projectedSC < breakeven) {
       unfillableOCIds.add(oc.ocId);
-      // Only release members in non-safe roles — safe roles don't hurt viability
       const retained = [];
       (assignments[oc.ocId]||[]).forEach(a => {
-        const ocsR = getOCSRole(oc.ocName, a.role);
-        const isSafe = ocsR?.safe ?? getRoleCPRRange(a.role).safe;
-        if (isSafe) {
-          retained.push(a); // keep safe-role members assigned
+        const ocsR  = getOCSRole(oc.ocName, a.role);
+        const isFree = ocsR?.tier === 'FREE';
+        if (isFree) {
+          retained.push(a);
         } else {
           usedMembers.delete(a.member);
           releasedMembers.add(a.member);
         }
       });
-      // Rebuild assignments with only safe-role members retained
       if (retained.length > 0) {
         assignments[oc.ocId] = retained;
         filledRoles[oc.ocId] = {};
@@ -783,7 +1137,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     }
   }
 
-  // Pass 3: try released members on remaining viable OCs
+  // ── Pass 3: released members → viable OCs ────────────────────
   if (releasedMembers.size > 0) {
     for (const item of queue) {
       if (!releasedMembers.has(item.member)) continue;
@@ -792,42 +1146,28 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     }
   }
 
-  // Pass 4: fill safe roles of unfillable OCs with ANY unassigned member.
-  // Safe roles (safe:true) accept everyone regardless of CPR — no_data, cpr_unknown,
-  // or even CPR of 1% — it doesn't matter. The OC can't reach breakeven regardless,
-  // but we still want to show which members should fill safe slots.
-  // We use the full member pool (not just released) and pick lowest-priority members
-  // so we don't pull anyone who could be useful elsewhere.
+  // ── Pass 4: fill FREE slots of unfillable OCs ────────────────
+  // FREE slots accept ANY member — even zero CPR.
+  // Use lowest-CPR available members to preserve strong ones for viable OCs.
   for (const oc of ocList) {
     if (!unfillableOCIds.has(oc.ocId)) continue;
     for (const role of (oc.openRoles || [])) {
       const ocsR  = getOCSRole(oc.ocName, role);
-      const isSafe = ocsR?.safe ?? getRoleCPRRange(role).safe;
-      if (!isSafe) continue; // only fill safe slots here
-      if (filledRoles[oc.ocId]?.[role]) continue; // already filled
-
-      // Find any unassigned member — prefer those with lowest CPR for this role
-      // (save higher-CPR members for viable OCs)
+      const isFree = ocsR?.tier === 'FREE';
+      if (!isFree) continue;
+      if (filledRoles[oc.ocId]?.[role]) continue;
       const candidates = memberPool
         .filter(m => !usedMembers.has(m.name))
         .map(m => ({
-          member:       m.name,
-          memberStatus: m.status || 'available',
-          ocName:       oc.ocName,
-          ocId:         oc.ocId,
-          ocLevel:      FLOWCHARTS[oc.ocName]?.level || 1,
-          role,
-          roleType:     'safe',
-          cpr:          getMemberCPR(memberCPRMap, m.name, oc.ocName, role),
-          delta:        0,
-          flag:         !memberCPRMap[m.name] ? 'no_data' : null,
-          priorityScore: 0,
+          member: m.name, memberStatus: m.status || 'available',
+          ocName: oc.ocName, ocId: oc.ocId,
+          ocLevel: FLOWCHARTS[oc.ocName]?.level || 1,
+          role, roleType: 'free',
+          cpr: getMemberCPR(memberCPRMap, m.name, oc.ocName, role), delta: 0,
+          flag: !memberCPRMap[m.name] ? 'no_data' : null, priorityScore: 0,
         }))
-        .sort((a,b) => (a.cpr||0) - (b.cpr||0)); // lowest CPR first for safe slots
-
-      if (candidates.length > 0) {
-        tryAssign(candidates[0]);
-      }
+        .sort((a,b) => (a.cpr||0) - (b.cpr||0));
+      if (candidates.length > 0) tryAssign(candidates[0]);
     }
   }
 
@@ -865,8 +1205,8 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
           .filter(r => !retainedRoles.has(r))
           .map(r => ({
             role:     r,
-            roleType: getOCSRole(oc.ocName, r)?.crit ? 'critical' : getOCSRole(oc.ocName, r)?.safe ? 'safe' : 'high-impact',
-            urgent:   getOCSRole(oc.ocName, r)?.crit ?? false,
+            roleType: getOCSRole(oc.ocName, r)?.tier === 'CRITICAL' ? 'critical' : getOCSRole(oc.ocName, r)?.tier === 'FREE' ? 'free' : 'important',
+            urgent:   getOCSRole(oc.ocName, r)?.tier === 'CRITICAL',
             reason:   'insufficient_qualified_members',
           })),
       });
@@ -876,7 +1216,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     // Conservative simulation for display (same logic as viability check)
     const assembledCPRs = { ...(oc.filledCPRs||{}) };
     (assignments[oc.ocId]||[]).forEach(a => {
-      assembledCPRs[a.role] = a.cpr !== null ? a.cpr : getRoleCPRRange(a.role).absMin;
+      assembledCPRs[a.role] = a.cpr !== null ? a.cpr : (getOCSRole(oc.ocName, a.role)?.absMin ?? getRoleCPRRange(a.role).absMin);
     });
     const projected   = simulateOC(oc.ocName, assembledCPRs);
     const projectedSC = projected?.successChance || 0;
@@ -901,8 +1241,8 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
       team:             assignments[oc.ocId] || [],
     unfilledRoles:    unfilledRoles.map(r => ({
         role:     r,
-        roleType: getOCSRole(oc.ocName, r)?.crit ? 'critical' : getOCSRole(oc.ocName, r)?.safe ? 'safe' : 'high-impact',
-        urgent:   getOCSRole(oc.ocName, r)?.crit ?? false,
+        roleType: getOCSRole(oc.ocName, r)?.tier === 'CRITICAL' ? 'critical' : getOCSRole(oc.ocName, r)?.tier === 'FREE' ? 'free' : 'important',
+        urgent:   getOCSRole(oc.ocName, r)?.tier === 'CRITICAL',
       })),
     });
   }
@@ -975,7 +1315,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'2.9.3', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'3.0.0', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
