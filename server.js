@@ -806,6 +806,12 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
   const d = memberCPRs[memberName]; if (!d) return null;
   const base = getRoleBase(role);
 
+  // Candidate OC name variants to try:
+  // 1. Exact ocName (already normalised by optimizer e.g. "Cash Me If You Can")
+  // 2. normOCName applied to each DB key — handles mismatches like
+  //    DB "Cash Me if You Can" → normOCName → "Cash Me If You Can" ✓
+  //    DB "Guardian Ángels"    → normOCName → "Guardian Angels"    ✓
+  // Try exact match first for speed, then scan all keys with normalisation.
   const tryKey = (key) => {
     const ocData = d.cprs?.[key]; if (!ocData) return null;
     return ocData[role] ?? ocData[base] ?? null;
@@ -825,18 +831,6 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
         if (r !== null) return r;
       }
     }
-  }
-
-  // Fallback: member has DB entry but no CPR for this specific OC.
-  // Use their best CPR for the same role across any OC they have played.
-  // TornStats CPR is role-based skill — 91% Car Thief in Smoke ≈ 91% in No Reserve.
-  if (d.cprs) {
-    let best = null;
-    for (const ocData of Object.values(d.cprs)) {
-      const v = ocData[role] ?? ocData[base];
-      if (v !== null && v !== undefined && (best === null || v > best)) best = v;
-    }
-    if (best !== null) return best;
   }
 
   return null;
@@ -995,8 +989,10 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         else if (memberCPRMap[member.name].isStale) flag = 'cpr_stale';
 
         // ── BLOCKING RULES ───────────────────────────────────────
-        if (isFree) {
-          // FREE slots: accept everyone, CPR irrelevant
+        const ocLevel_ = FLOWCHARTS[oc.ocName]?.level || 1;
+        if (isFree || ocLevel_ === 1) {
+          // FREE slots and ALL L1 OC roles: accept everyone, CPR irrelevant.
+          // L1 OCs exist for CE development — fill with anyone available.
         } else if (isCrit) {
           // CRITICAL roles: must have known CPR ≥ absMin
           if (flag === 'no_data' || flag === 'cpr_unknown') {
@@ -1104,53 +1100,11 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
   }
   queue.sort((a, b) => b.priorityScore - a.priorityScore);
 
-  // ── Pass 2: viability check ───────────────────────────────────
+  // ── Pass 2: viability check (disabled per operator instruction) ─
+  // Members stay in the highest OC they qualified for.
+  // Do not release members based on projected success floor.
   const unfillableOCIds = new Set();
   const releasedMembers = new Set();
-
-  for (const oc of ocList) {
-    const ocLevel   = FLOWCHARTS[oc.ocName]?.level || 1;
-    const breakeven = (SCOPE_BREAKEVEN[ocLevel] || 0.75) * 100;
-
-    const assembledCPRs = { ...(oc.filledCPRs||{}) };
-    (assignments[oc.ocId]||[]).forEach(a => {
-      assembledCPRs[a.role] = a.cpr !== null ? a.cpr : (getOCSRole(oc.ocName, a.role)?.absMin ?? getRoleCPRRange(a.role).absMin);
-    });
-
-    const projectedSC = simulateOC(oc.ocName, assembledCPRs)?.successChance || 0;
-
-    if (projectedSC < breakeven) {
-      unfillableOCIds.add(oc.ocId);
-      const retained = [];
-      (assignments[oc.ocId]||[]).forEach(a => {
-        const ocsR  = getOCSRole(oc.ocName, a.role);
-        const isFree = ocsR?.tier === 'FREE';
-        if (isFree) {
-          retained.push(a);
-        } else {
-          usedMembers.delete(a.member);
-          releasedMembers.add(a.member);
-        }
-      });
-      if (retained.length > 0) {
-        assignments[oc.ocId] = retained;
-        filledRoles[oc.ocId] = {};
-        retained.forEach(a => { filledRoles[oc.ocId][a.role] = a.member; });
-      } else {
-        delete assignments[oc.ocId];
-        delete filledRoles[oc.ocId];
-      }
-    }
-  }
-
-  // ── Pass 3: released members → viable OCs ────────────────────
-  if (releasedMembers.size > 0) {
-    for (const item of queue) {
-      if (!releasedMembers.has(item.member)) continue;
-      if (unfillableOCIds.has(item.ocId))   continue;
-      tryAssign(item);
-    }
-  }
 
   // ── Pass 4: fill FREE slots of unfillable OCs ────────────────
   // FREE slots accept ANY member — even zero CPR.
