@@ -833,6 +833,22 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
     }
   }
 
+  // Same-level fallback: member has DB data but no CPR for this specific OC.
+  // Torn calculates CPR from player stats — CPR for the same role at the same
+  // difficulty level is the same value regardless of which OC. Use it directly.
+  if (d.cprs) {
+    const ocLevel = FLOWCHARTS[ocName]?.level;
+    if (ocLevel != null) {
+      // Find any stored OC at the same difficulty level with this role
+      for (const [storedOCName, ocData] of Object.entries(d.cprs)) {
+        const storedLevel = FLOWCHARTS[normOCName(storedOCName)]?.level;
+        if (storedLevel !== ocLevel) continue;
+        const v = ocData[role] ?? ocData[base];
+        if (v != null) return v;
+      }
+    }
+  }
+
   return null;
 }
 
@@ -1019,7 +1035,6 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         const withMember = simulateOC(oc.ocName, { ...(oc.filledCPRs||{}), [role]: effectiveCPR });
         const delta = withMember ? withMember.successChance - baseline.successChance : 0;
 
-        // Use effectiveCPR so client shows the actual value used (absMin for cpr_unknown)
         impactMatrix[member.name][oc.ocId][role] = { cpr: cpr !== null ? cpr : effectiveCPR, flag, delta, ocsRole, blocked: false };
       }
     }
@@ -1053,9 +1068,6 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
           delta:         impact.delta,
           flag:          impact.flag,
           basePri:       baseRolePri,
-          // Free slots score at 1/10th of level to always lose to Critical/Important
-          // at any level. Within Free slots, higher-level OCs still preferred.
-          // Min Critical/Important score at L1 ≈ 1000+50 = 1050. Free max at L6 = 600.
           priorityScore: impact.ocsRole?.tier === 'FREE'
             ? (ocLevel * 100)
             : (ocLevel * 1000) + penalised + (impact.delta * 10),
@@ -1106,7 +1118,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
   queue.sort((a, b) => b.priorityScore - a.priorityScore);
 
   // ── Pass 2: viability check (disabled) ──────────────────────
-  // Members stay in highest OC they qualify for — no scope floor.
+  // Push members into highest OC they qualify for — no scope floor.
   const unfillableOCIds = new Set();
   const releasedMembers = new Set();
 
@@ -1279,7 +1291,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'3.0.2', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'3.0.3', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1567,7 +1579,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.0.2 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.0.3 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
