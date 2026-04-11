@@ -992,20 +992,28 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         if (isFree) {
           // FREE slots: accept everyone, CPR irrelevant
         } else if (isCrit) {
-          // CRITICAL roles: must have known CPR ≥ absMin
-          if (flag === 'no_data' || flag === 'cpr_unknown') {
+          // CRITICAL roles: block only if no DB entry at all, or CPR confirmed below absMin.
+          // cpr_unknown (has DB entry but no CPR for this OC) → use absMin as conservative
+          // estimate so the member can compete but ranks below members with known CPR.
+          if (flag === 'no_data') {
             impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
             continue;
+          }
+          if (flag === 'cpr_unknown') {
+            cpr = absMin; // conservative fallback — ranks below anyone with real CPR
           }
           if (cpr !== null && cpr < absMin) {
             impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, ocsRole, blocked: true };
             continue;
           }
         } else {
-          // IMPORTANT roles: accept if known CPR ≥ absMin; block no_data
+          // IMPORTANT roles: accept if known CPR ≥ absMin; block no_data only
           if (flag === 'no_data') {
             impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
             continue;
+          }
+          if (flag === 'cpr_unknown') {
+            cpr = absMin; // conservative fallback
           }
           if (cpr !== null && cpr < absMin) {
             impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, ocsRole, blocked: true };
@@ -1051,10 +1059,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
           delta:         impact.delta,
           flag:          impact.flag,
           basePri:       baseRolePri,
-          // FREE slots: score capped below any Critical/Important slot at any level.
-          priorityScore: impact.ocsRole?.tier === 'FREE'
-            ? 999 - (impact.cpr ?? 99) * 3
-            : (ocLevel * 1000) + penalised + (impact.delta * 10),
+          priorityScore: (ocLevel * 1000) + penalised + (impact.delta * 10),
         });
       }
     }
