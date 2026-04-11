@@ -833,9 +833,8 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
     }
   }
 
-  // Same-level fallback: member has DB data but no CPR for this specific OC.
-  // Torn calculates CPR from player stats — same role at same difficulty level
-  // uses the same underlying stat scaling, so CPR is consistent across OCs.
+  // Same-level fallback: Torn calculates CPR from player stats — same role at
+  // same difficulty level produces the same CPR regardless of which OC.
   if (d.cprs) {
     const ocLevel = FLOWCHARTS[ocName]?.level;
     if (ocLevel != null) {
@@ -1067,19 +1066,13 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
           delta:         impact.delta,
           flag:          impact.flag,
           basePri:       baseRolePri,
-          // Level multiplier scales with CPR quality: 500 (at absMin) → 1000 (at/above idealMin)
-          // This prevents a member barely above absMin at L3 from outscoring
-          // the same member well above idealMin at L2.
-          // FREE slots use flat ocLevel*100 to always lose to Critical/Important.
           ...((() => {
+            if (impact.ocsRole?.tier === 'FREE') return { priorityScore: ocLevel * 100 };
             let levelMult = 1000;
-            if (impact.ocsRole?.tier === 'FREE') {
-              return { priorityScore: ocLevel * 100 };
-            }
             if (impact.cpr !== null) {
-              const ocsR    = impact.ocsRole;
-              const absMin  = ocsR?.absMin  ?? getRoleCPRRange(role).absMin;
-              const idealMin= ocsR?.idealMin ?? getRoleCPRRange(role).idealMin;
+              const ocsR     = impact.ocsRole;
+              const absMin   = ocsR?.absMin  ?? getRoleCPRRange(role).absMin;
+              const idealMin = ocsR?.idealMin ?? getRoleCPRRange(role).idealMin;
               const gap = idealMin - absMin;
               if (gap > 0) {
                 const frac = Math.min(1, Math.max(0, (impact.cpr - absMin) / gap));
@@ -1134,8 +1127,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
   }
   queue.sort((a, b) => b.priorityScore - a.priorityScore);
 
-  // ── Pass 2: viability check (disabled) ──────────────────────
-  // Members stay in highest OC they qualify for — no scope floor.
+  // ── Pass 2: viability check (disabled — members stay at highest OC) ──
   const unfillableOCIds = new Set();
   const releasedMembers = new Set();
 
@@ -1308,7 +1300,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'3.0.3', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'3.1.0', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1365,11 +1357,25 @@ app.post('/api/cpr', rateLimit('cpr'), async (req, res) => {
   if (!cprs) return res.status(400).json({error:'Missing cprs'});
   const factionId = getFactionId(key);
   try {
+    // Deep-merge: incoming OC data overlays existing — never wipes history.
+    // For each OC key in incoming data, merge its roles on top of stored roles.
     await query(
       `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
        VALUES ($1,$2,$3,$4,NOW())
        ON CONFLICT (faction_id, member_name)
-       DO UPDATE SET cprs=$4, source=$3, updated_at=NOW()`,
+       DO UPDATE SET
+         cprs = (
+           SELECT jsonb_object_agg(oc, COALESCE(existing.roles, '{}'::jsonb) || COALESCE(incoming.roles, '{}'::jsonb))
+           FROM (
+             SELECT key AS oc, value AS roles FROM jsonb_each(member_cpr.cprs)
+             UNION ALL
+             SELECT key AS oc, value AS roles FROM jsonb_each($4::jsonb)
+             WHERE key NOT IN (SELECT key FROM jsonb_each(member_cpr.cprs))
+           ) AS existing(oc, roles)
+           LEFT JOIN (SELECT key AS oc, value AS roles FROM jsonb_each($4::jsonb)) AS incoming USING (oc)
+         ),
+         source = $3,
+         updated_at = NOW()`,
       [factionId, memberName, source||'personal', JSON.stringify(cprs)]
     );
     await invalidateCache(factionId);
@@ -1395,12 +1401,25 @@ app.post('/api/cpr/batch', rateLimit('cpr_batch'), async (req, res) => {
     await client.query('BEGIN');
     for (const [memberName, cprs] of entries) {
       await client.query(
+        // Deep-merge: incoming OC roles overlay existing — never wipes history.
+        // Preserves all previously stored OC data, only updates/adds new roles.
         `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
          VALUES ($1,$2,'tornstats',$3,NOW())
          ON CONFLICT (faction_id, member_name)
          DO UPDATE SET
-           cprs = CASE WHEN member_cpr.source='personal' THEN member_cpr.cprs||$3::jsonb ELSE $3::jsonb END,
-           source = CASE WHEN member_cpr.source='personal' THEN 'personal' ELSE 'tornstats' END,
+           cprs = (
+             SELECT jsonb_object_agg(oc, COALESCE(existing_roles, '{}'::jsonb) || COALESCE(incoming_roles, '{}'::jsonb))
+             FROM (
+               SELECT key AS oc, value AS existing_roles,
+                      ($3::jsonb)->key AS incoming_roles
+               FROM jsonb_each(member_cpr.cprs)
+               UNION ALL
+               SELECT key AS oc, NULL AS existing_roles, value AS incoming_roles
+               FROM jsonb_each($3::jsonb)
+               WHERE key NOT IN (SELECT key FROM jsonb_each(member_cpr.cprs))
+             ) AS merged(oc, existing_roles, incoming_roles)
+           ),
+           source = 'tornstats',
            updated_at = NOW()`,
         [factionId, memberName, JSON.stringify(cprs)]
       );
@@ -1596,7 +1615,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.0.3 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.1.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
