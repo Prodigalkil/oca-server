@@ -833,16 +833,15 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
     }
   }
 
-  // Same-level fallback: Torn calculates CPR from player stats — same role at
-  // same difficulty level produces the same CPR regardless of which OC.
+  // Same-level fallback: same difficulty level = same CPR regardless of OC
   if (d.cprs) {
-    const ocLevel = FLOWCHARTS[ocName]?.level;
+    const ocLevel = Object.entries(FLOWCHARTS).find(([n]) => n === ocName)?.[1]?.level;
     if (ocLevel != null) {
-      for (const [storedOCName, ocData] of Object.entries(d.cprs)) {
-        const storedLevel = FLOWCHARTS[normOCName(storedOCName)]?.level;
+      for (const [storedKey, ocData] of Object.entries(d.cprs)) {
+        const storedLevel = FLOWCHARTS[normOCName(storedKey)]?.level ?? FLOWCHARTS[storedKey]?.level;
         if (storedLevel !== ocLevel) continue;
-        const v = ocData[role] ?? ocData[base];
-        if (v != null) return v;
+        const r = ocData[role] ?? ocData[base] ?? null;
+        if (r !== null) return r;
       }
     }
   }
@@ -1005,7 +1004,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         // ── BLOCKING RULES ───────────────────────────────────────
         const ocLevel_ = FLOWCHARTS[oc.ocName]?.level || 1;
         if (isFree || ocLevel_ === 1) {
-          // FREE slots and ALL L1 roles: accept everyone, CPR irrelevant
+          // FREE slots and L1 OCs: accept everyone
         } else if (isCrit) {
           // CRITICAL roles: must have known CPR ≥ absMin
           if (flag === 'no_data' || flag === 'cpr_unknown') {
@@ -1017,8 +1016,8 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
             continue;
           }
         } else {
-          // IMPORTANT roles: accept if known CPR ≥ absMin; block no_data
-          if (flag === 'no_data') {
+          // IMPORTANT roles: block no_data AND cpr_unknown (unknown CPR = don't place)
+          if (flag === 'no_data' || flag === 'cpr_unknown') {
             impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
             continue;
           }
@@ -1033,7 +1032,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         const withMember = simulateOC(oc.ocName, { ...(oc.filledCPRs||{}), [role]: effectiveCPR });
         const delta = withMember ? withMember.successChance - baseline.successChance : 0;
 
-        impactMatrix[member.name][oc.ocId][role] = { cpr: cpr !== null ? cpr : effectiveCPR, flag, delta, ocsRole, blocked: false };
+        impactMatrix[member.name][oc.ocId][role] = { cpr, flag, delta, ocsRole, blocked: false };
       }
     }
   }
@@ -1300,7 +1299,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'3.1.0', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'3.0.0', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1357,23 +1356,12 @@ app.post('/api/cpr', rateLimit('cpr'), async (req, res) => {
   if (!cprs) return res.status(400).json({error:'Missing cprs'});
   const factionId = getFactionId(key);
   try {
-    // Deep-merge: incoming OC data overlays existing — never wipes history.
-    // For each OC key in incoming data, merge its roles on top of stored roles.
     await query(
       `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
        VALUES ($1,$2,$3,$4,NOW())
        ON CONFLICT (faction_id, member_name)
        DO UPDATE SET
-         cprs = (
-           SELECT jsonb_object_agg(oc, COALESCE(existing.roles, '{}'::jsonb) || COALESCE(incoming.roles, '{}'::jsonb))
-           FROM (
-             SELECT key AS oc, value AS roles FROM jsonb_each(member_cpr.cprs)
-             UNION ALL
-             SELECT key AS oc, value AS roles FROM jsonb_each($4::jsonb)
-             WHERE key NOT IN (SELECT key FROM jsonb_each(member_cpr.cprs))
-           ) AS existing(oc, roles)
-           LEFT JOIN (SELECT key AS oc, value AS roles FROM jsonb_each($4::jsonb)) AS incoming USING (oc)
-         ),
+         cprs = member_cpr.cprs || $4::jsonb,
          source = $3,
          updated_at = NOW()`,
       [factionId, memberName, source||'personal', JSON.stringify(cprs)]
@@ -1401,24 +1389,11 @@ app.post('/api/cpr/batch', rateLimit('cpr_batch'), async (req, res) => {
     await client.query('BEGIN');
     for (const [memberName, cprs] of entries) {
       await client.query(
-        // Deep-merge: incoming OC roles overlay existing — never wipes history.
-        // Preserves all previously stored OC data, only updates/adds new roles.
         `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
          VALUES ($1,$2,'tornstats',$3,NOW())
          ON CONFLICT (faction_id, member_name)
          DO UPDATE SET
-           cprs = (
-             SELECT jsonb_object_agg(oc, COALESCE(existing_roles, '{}'::jsonb) || COALESCE(incoming_roles, '{}'::jsonb))
-             FROM (
-               SELECT key AS oc, value AS existing_roles,
-                      ($3::jsonb)->key AS incoming_roles
-               FROM jsonb_each(member_cpr.cprs)
-               UNION ALL
-               SELECT key AS oc, NULL AS existing_roles, value AS incoming_roles
-               FROM jsonb_each($3::jsonb)
-               WHERE key NOT IN (SELECT key FROM jsonb_each(member_cpr.cprs))
-             ) AS merged(oc, existing_roles, incoming_roles)
-           ),
+           cprs = member_cpr.cprs || $3::jsonb,
            source = 'tornstats',
            updated_at = NOW()`,
         [factionId, memberName, JSON.stringify(cprs)]
@@ -1465,7 +1440,7 @@ app.post('/api/cpr/cleanup', async (req, res) => {
   if (!isLeaderKey(key)) return res.status(403).json({error:'Leader key required'});
   const factionId = getFactionId(key);
   try {
-    const r = await query(`DELETE FROM member_cpr WHERE faction_id=$1 AND (member_name ~ '^[0-9]+$' OR member_name ~ '^[0-9]')`, [factionId]);
+    const r = await query(`DELETE FROM member_cpr WHERE faction_id=$1 AND member_name ~ '^[0-9]+$'`, [factionId]);
     await invalidateCache(factionId);
     res.json({ok:true, removed:r.rowCount});
   } catch(e) { res.status(500).json({error:e.message}); }
@@ -1615,7 +1590,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.1.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.2.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
