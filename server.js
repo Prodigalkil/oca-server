@@ -991,8 +991,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         // ── BLOCKING RULES ───────────────────────────────────────
         const ocLevel_ = FLOWCHARTS[oc.ocName]?.level || 1;
         if (isFree || ocLevel_ === 1) {
-          // FREE slots and ALL L1 OC roles: accept everyone, CPR irrelevant.
-          // L1 OCs exist for CE development — fill with anyone available.
+          // FREE slots and ALL L1 roles: accept everyone, CPR irrelevant
         } else if (isCrit) {
           // CRITICAL roles: must have known CPR ≥ absMin
           if (flag === 'no_data' || flag === 'cpr_unknown') {
@@ -1020,7 +1019,8 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         const withMember = simulateOC(oc.ocName, { ...(oc.filledCPRs||{}), [role]: effectiveCPR });
         const delta = withMember ? withMember.successChance - baseline.successChance : 0;
 
-        impactMatrix[member.name][oc.ocId][role] = { cpr, flag, delta, ocsRole, blocked: false };
+        // Use effectiveCPR so client shows the actual value used (absMin for cpr_unknown)
+        impactMatrix[member.name][oc.ocId][role] = { cpr: cpr !== null ? cpr : effectiveCPR, flag, delta, ocsRole, blocked: false };
       }
     }
   }
@@ -1053,7 +1053,12 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
           delta:         impact.delta,
           flag:          impact.flag,
           basePri:       baseRolePri,
-          priorityScore: (ocLevel * 1000) + penalised + (impact.delta * 10),
+          // Free slots score at 1/10th of level to always lose to Critical/Important
+          // at any level. Within Free slots, higher-level OCs still preferred.
+          // Min Critical/Important score at L1 ≈ 1000+50 = 1050. Free max at L6 = 600.
+          priorityScore: impact.ocsRole?.tier === 'FREE'
+            ? (ocLevel * 100)
+            : (ocLevel * 1000) + penalised + (impact.delta * 10),
         });
       }
     }
@@ -1100,9 +1105,8 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
   }
   queue.sort((a, b) => b.priorityScore - a.priorityScore);
 
-  // ── Pass 2: viability check (disabled per operator instruction) ─
-  // Members stay in the highest OC they qualified for.
-  // Do not release members based on projected success floor.
+  // ── Pass 2: viability check (disabled) ──────────────────────
+  // Members stay in highest OC they qualify for — no scope floor.
   const unfillableOCIds = new Set();
   const releasedMembers = new Set();
 
