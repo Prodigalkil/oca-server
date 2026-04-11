@@ -1051,9 +1051,9 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
           delta:         impact.delta,
           flag:          impact.flag,
           basePri:       baseRolePri,
-          // FREE slots: prefer lowest CPR — preserves high-CPR members for Critical/Important
+          // FREE slots: score capped below any Critical/Important slot at any level.
           priorityScore: impact.ocsRole?.tier === 'FREE'
-            ? (ocLevel * 1000) - (impact.cpr ?? 99) * 10
+            ? 999 - (impact.cpr ?? 99) * 3
             : (ocLevel * 1000) + penalised + (impact.delta * 10),
         });
       }
@@ -1318,7 +1318,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'3.0.1', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'3.0.2', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1606,7 +1606,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.0.1 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.0.2 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
