@@ -834,12 +834,11 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
   }
 
   // Same-level fallback: member has DB data but no CPR for this specific OC.
-  // Torn calculates CPR from player stats — CPR for the same role at the same
-  // difficulty level is the same value regardless of which OC. Use it directly.
+  // Torn calculates CPR from player stats — same role at same difficulty level
+  // uses the same underlying stat scaling, so CPR is consistent across OCs.
   if (d.cprs) {
     const ocLevel = FLOWCHARTS[ocName]?.level;
     if (ocLevel != null) {
-      // Find any stored OC at the same difficulty level with this role
       for (const [storedOCName, ocData] of Object.entries(d.cprs)) {
         const storedLevel = FLOWCHARTS[normOCName(storedOCName)]?.level;
         if (storedLevel !== ocLevel) continue;
@@ -1068,9 +1067,27 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
           delta:         impact.delta,
           flag:          impact.flag,
           basePri:       baseRolePri,
-          priorityScore: impact.ocsRole?.tier === 'FREE'
-            ? (ocLevel * 100)
-            : (ocLevel * 1000) + penalised + (impact.delta * 10),
+          // Level multiplier scales with CPR quality: 500 (at absMin) → 1000 (at/above idealMin)
+          // This prevents a member barely above absMin at L3 from outscoring
+          // the same member well above idealMin at L2.
+          // FREE slots use flat ocLevel*100 to always lose to Critical/Important.
+          ...((() => {
+            let levelMult = 1000;
+            if (impact.ocsRole?.tier === 'FREE') {
+              return { priorityScore: ocLevel * 100 };
+            }
+            if (impact.cpr !== null) {
+              const ocsR    = impact.ocsRole;
+              const absMin  = ocsR?.absMin  ?? getRoleCPRRange(role).absMin;
+              const idealMin= ocsR?.idealMin ?? getRoleCPRRange(role).idealMin;
+              const gap = idealMin - absMin;
+              if (gap > 0) {
+                const frac = Math.min(1, Math.max(0, (impact.cpr - absMin) / gap));
+                levelMult = Math.round(500 + 500 * frac);
+              }
+            }
+            return { priorityScore: (ocLevel * levelMult) + penalised + (impact.delta * 10) };
+          })()),
         });
       }
     }
@@ -1118,7 +1135,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
   queue.sort((a, b) => b.priorityScore - a.priorityScore);
 
   // ── Pass 2: viability check (disabled) ──────────────────────
-  // Push members into highest OC they qualify for — no scope floor.
+  // Members stay in highest OC they qualify for — no scope floor.
   const unfillableOCIds = new Set();
   const releasedMembers = new Set();
 
