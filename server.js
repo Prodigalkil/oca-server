@@ -1584,13 +1584,152 @@ app.post('/api/keys/migrate', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// ROSTER / COVERAGE HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+// OC level → absMin and idealMin thresholds (mirrors OCS_ROLES comments)
+const LEVEL_ABSMIN  = {1:50,2:50,3:55,4:55,5:58,6:58,7:60,8:62,9:64,10:66};
+const LEVEL_IDEALMIN = {1:65,2:65,3:68,4:68,5:70,6:70,7:72,8:74,9:76,10:78};
+
+// OC name → level lookup (derived from FLOWCHARTS)
+function getOCLevel(ocName) {
+  return FLOWCHARTS[ocName]?.level ?? FLOWCHARTS[normOCName(ocName)]?.level ?? null;
+}
+
+// Compute member ceiling: highest OC level where member has ≥1 non-FREE role ≥ absMin.
+// Returns { level, cpr, isStrong } or null.
+// isStrong = CPR ≥ idealMin for that level (community 2-to-1 threshold).
+function getMemberCeiling(memberData) {
+  if (!memberData?.cprs) return null;
+  let ceiling = 0, ceilingCPR = null;
+
+  Object.entries(memberData.cprs).forEach(([storedOC, roles]) => {
+    const level = getOCLevel(storedOC);
+    if (!level) return;
+    const am = LEVEL_ABSMIN[level] || 50;
+
+    Object.entries(roles).forEach(([role, cpr]) => {
+      const rc = getRoleCPRRange(role);
+      if (rc.safe) return;                                    // skip FREE roles
+      if (typeof cpr !== 'number') return;
+      if (cpr >= am && (level > ceiling || (level === ceiling && cpr > (ceilingCPR || 0)))) {
+        ceiling = level;
+        ceilingCPR = cpr;
+      }
+    });
+  });
+
+  if (ceiling === 0) return null;
+  const im = LEVEL_IDEALMIN[ceiling] || 65;
+  return { level: ceiling, cpr: ceilingCPR, isStrong: ceilingCPR >= im };
+}
+
+// ── /api/roster ──────────────────────────────────────────────
+// Returns per-member ceiling level, CPR, strong/marginal flag.
+// Leader key only — business logic stays server-side.
+app.get('/api/roster', rateLimit('roster'), async (req, res) => {
+  const key = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res); if (!owner) return;
+  if (!isLeaderKey(key)) return res.status(403).json({error:'Leader key required'});
+  const factionId = getFactionId(key);
+
+  try {
+    const r = await query(
+      'SELECT member_name, source, cprs, updated_at FROM member_cpr WHERE faction_id=$1',
+      [factionId]
+    );
+
+    const members = r.rows.map(row => {
+      const data = { cprs: row.cprs, source: row.source, updatedAt: row.updated_at };
+      const ceiling = getMemberCeiling(data);
+      return {
+        name:     row.member_name,
+        ceiling,                          // { level, cpr, isStrong } or null
+        source:   row.source,
+        isStale:  isCPRStale(row.updated_at),
+        updatedAt: row.updated_at,
+      };
+    });
+
+    // Sort ceiling desc, then name asc
+    members.sort((a, b) =>
+      (b.ceiling?.level || 0) - (a.ceiling?.level || 0) ||
+      a.name.localeCompare(b.name)
+    );
+
+    res.json({ members, factionId });
+  } catch(e) {
+    console.error('[ROSTER] Error:', e.message);
+    res.status(500).json({ error: 'Failed to compute roster' });
+  }
+});
+
+// ── /api/coverage ─────────────────────────────────────────────
+// Returns per-level depth counts (strong / marginal) for every level
+// the faction is currently capable of running (L1 up to highest member ceiling).
+// Strong  = ceilingCPR ≥ idealMin for that level
+// Marginal = ceilingCPR ≥ absMin but below idealMin
+// A member with ceiling Lx counts for Lx AND all lower levels.
+// Leader key only.
+app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
+  const key = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res); if (!owner) return;
+  if (!isLeaderKey(key)) return res.status(403).json({error:'Leader key required'});
+  const factionId = getFactionId(key);
+
+  try {
+    const r = await query(
+      'SELECT member_name, cprs, updated_at FROM member_cpr WHERE faction_id=$1',
+      [factionId]
+    );
+
+    // Compute ceiling for every member in DB
+    const ceilings = r.rows.map(row => {
+      const ceiling = getMemberCeiling({ cprs: row.cprs });
+      return { name: row.member_name, ceiling };
+    }).filter(m => m.ceiling !== null);
+
+    // Find max level to cap our range dynamically
+    const maxLevel = ceilings.reduce((max, m) => Math.max(max, m.ceiling.level), 0);
+    if (maxLevel === 0) return res.json({ levels: {}, maxLevel: 0, factionId });
+
+    // Build per-level depth counts
+    // Each member counts for their ceiling level AND every level below it
+    const levels = {};
+    for (let lvl = 1; lvl <= maxLevel; lvl++) {
+      levels[lvl] = { strong: 0, marginal: 0, members: [] };
+    }
+
+    for (const { name, ceiling } of ceilings) {
+      const im = LEVEL_IDEALMIN[ceiling.level] || 65;
+      const isStrong = ceiling.cpr >= im;
+
+      // Count this member for their ceiling level and all levels below
+      for (let lvl = 1; lvl <= ceiling.level; lvl++) {
+        if (isStrong) {
+          levels[lvl].strong++;
+        } else {
+          levels[lvl].marginal++;
+        }
+        levels[lvl].members.push({ name, cpr: ceiling.cpr, isStrong, ceilingLevel: ceiling.level });
+      }
+    }
+
+    res.json({ levels, maxLevel, factionId });
+  } catch(e) {
+    console.error('[COVERAGE] Error:', e.message);
+    res.status(500).json({ error: 'Failed to compute coverage' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════════════════
 
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.2.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.3.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
