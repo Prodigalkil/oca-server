@@ -992,28 +992,20 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
         if (isFree) {
           // FREE slots: accept everyone, CPR irrelevant
         } else if (isCrit) {
-          // CRITICAL roles: block only if no DB entry at all, or CPR confirmed below absMin.
-          // cpr_unknown (has DB entry but no CPR for this OC) → use absMin as conservative
-          // estimate so the member can compete but ranks below members with known CPR.
-          if (flag === 'no_data') {
+          // CRITICAL roles: must have known CPR ≥ absMin
+          if (flag === 'no_data' || flag === 'cpr_unknown') {
             impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
             continue;
-          }
-          if (flag === 'cpr_unknown') {
-            cpr = absMin; // conservative fallback — ranks below anyone with real CPR
           }
           if (cpr !== null && cpr < absMin) {
             impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, ocsRole, blocked: true };
             continue;
           }
         } else {
-          // IMPORTANT roles: accept if known CPR ≥ absMin; block no_data only
+          // IMPORTANT roles: accept if known CPR ≥ absMin; block no_data
           if (flag === 'no_data') {
             impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
             continue;
-          }
-          if (flag === 'cpr_unknown') {
-            cpr = absMin; // conservative fallback
           }
           if (cpr !== null && cpr < absMin) {
             impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, ocsRole, blocked: true };
@@ -1323,7 +1315,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'3.0.2', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'3.0.1', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1611,7 +1603,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.0.2 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.0.1 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
