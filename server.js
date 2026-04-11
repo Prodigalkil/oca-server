@@ -1051,7 +1051,10 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
           delta:         impact.delta,
           flag:          impact.flag,
           basePri:       baseRolePri,
-          priorityScore: (ocLevel * 1000) + penalised + (impact.delta * 10),
+          // FREE slots: prefer lowest CPR — preserves high-CPR members for Critical/Important
+          priorityScore: impact.ocsRole?.tier === 'FREE'
+            ? (ocLevel * 1000) - (impact.cpr ?? 99) * 10
+            : (ocLevel * 1000) + penalised + (impact.delta * 10),
         });
       }
     }
@@ -1315,7 +1318,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'3.0.0', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'3.0.1', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1394,7 +1397,7 @@ app.post('/api/cpr/batch', rateLimit('cpr_batch'), async (req, res) => {
   const {members} = req.body;
   if (!members || typeof members !== 'object') return res.status(400).json({error:'Missing members'});
   const factionId = getFactionId(key);
-  const entries = Object.entries(members).filter(([name]) => name && !/^\d+$/.test(name.trim()) && name.trim().length >= 2);
+  const entries = Object.entries(members).filter(([name]) => name && !/^\d/.test(name.trim()) && name.trim().length >= 2);
   if (!entries.length) return res.json({ok:true, updated:0, skipped:Object.keys(members).length});
   let updated = 0, skipped = Object.keys(members).length - entries.length;
   const client = await pool.connect();
@@ -1453,7 +1456,7 @@ app.post('/api/cpr/cleanup', async (req, res) => {
   if (!isLeaderKey(key)) return res.status(403).json({error:'Leader key required'});
   const factionId = getFactionId(key);
   try {
-    const r = await query(`DELETE FROM member_cpr WHERE faction_id=$1 AND member_name ~ '^[0-9]+$'`, [factionId]);
+    const r = await query(`DELETE FROM member_cpr WHERE faction_id=$1 AND (member_name ~ '^[0-9]+$' OR member_name ~ '^[0-9]')`, [factionId]);
     await invalidateCache(factionId);
     res.json({ok:true, removed:r.rowCount});
   } catch(e) { res.status(500).json({error:e.message}); }
@@ -1603,7 +1606,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v2.9.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.0.1 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
