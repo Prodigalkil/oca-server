@@ -806,12 +806,6 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
   const d = memberCPRs[memberName]; if (!d) return null;
   const base = getRoleBase(role);
 
-  // Candidate OC name variants to try:
-  // 1. Exact ocName (already normalised by optimizer e.g. "Cash Me If You Can")
-  // 2. normOCName applied to each DB key — handles mismatches like
-  //    DB "Cash Me if You Can" → normOCName → "Cash Me If You Can" ✓
-  //    DB "Guardian Ángels"    → normOCName → "Guardian Angels"    ✓
-  // Try exact match first for speed, then scan all keys with normalisation.
   const tryKey = (key) => {
     const ocData = d.cprs?.[key]; if (!ocData) return null;
     return ocData[role] ?? ocData[base] ?? null;
@@ -831,6 +825,18 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
         if (r !== null) return r;
       }
     }
+  }
+
+  // Fallback: member has DB entry but no CPR for this specific OC.
+  // Use their best CPR for the same role across any OC they have played.
+  // TornStats CPR is role-based skill — 91% Car Thief in Smoke ≈ 91% in No Reserve.
+  if (d.cprs) {
+    let best = null;
+    for (const ocData of Object.values(d.cprs)) {
+      const v = ocData[role] ?? ocData[base];
+      if (v !== null && v !== undefined && (best === null || v > best)) best = v;
+    }
+    if (best !== null) return best;
   }
 
   return null;
@@ -1315,7 +1321,7 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.json({status:'ok', version:'3.0.1', ocs: Object.keys(FLOWCHARTS).length}));
+app.get('/', (req, res) => res.json({status:'ok', version:'3.0.2', ocs: Object.keys(FLOWCHARTS).length}));
 
 app.post('/api/score', rateLimit('score'), async (req, res) => {
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1603,7 +1609,7 @@ app.post('/api/keys/migrate', async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.0.1 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.0.2 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
