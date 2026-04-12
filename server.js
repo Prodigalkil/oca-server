@@ -852,7 +852,7 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
 const STALE_MS = 7 * 24 * 60 * 60 * 1000;
 function isCPRStale(updatedAt) { return !updatedAt || Date.now() - new Date(updatedAt).getTime() > STALE_MS; }
 
-async function optimizeFaction(factionId, ocs, requestingMember) {
+async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread') {
   // ── Load data ─────────────────────────────────────────────────
   let empirical = {};
   try {
@@ -1087,6 +1087,10 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
   queue.sort((a, b) => b.priorityScore - a.priorityScore);
 
   // ── Pass 1: greedy assignment ─────────────────────────────────
+  // spread mode: assign each member to their highest qualifying OC (current default)
+  // stack mode:  fill OCs to scope-breakeven viability before moving to next.
+  //              Sort OCs by level desc, complete each one before starting the next.
+  //              Better for small factions that can't staff multiple L5/L6 teams.
   const usedMembers = new Set();
   const filledRoles = {};
   const assignments = {};
@@ -1107,7 +1111,32 @@ async function optimizeFaction(factionId, ocs, requestingMember) {
     return true;
   }
 
-  for (const item of queue) { tryAssign(item); }
+  if (mode === 'stack') {
+    // Sort OCs by level desc — fill highest-value OCs first
+    const sortedOCs = [...ocList].sort((a, b) => {
+      const la = FLOWCHARTS[a.ocName]?.level || 1;
+      const lb = FLOWCHARTS[b.ocName]?.level || 1;
+      return lb - la;
+    });
+
+    for (const oc of sortedOCs) {
+      const ocLevel   = FLOWCHARTS[oc.ocName]?.level || 1;
+      const breakeven = (SCOPE_BREAKEVEN[ocLevel] || 0.75) * 100;
+
+      // Get all queue items for this OC, sorted by priority
+      const ocQueue = queue
+        .filter(item => item.ocId === oc.ocId && !usedMembers.has(item.member))
+        .sort((a, b) => b.priorityScore - a.priorityScore);
+
+      // Fill this OC completely before moving to the next
+      for (const item of ocQueue) {
+        tryAssign(item);
+      }
+    }
+  } else {
+    // spread mode — original greedy assignment across all OCs simultaneously
+    for (const item of queue) { tryAssign(item); }
+  }
 
   // ── Pass 1b: path-penalty re-sort ────────────────────────────
   // After the first greedy pass, we know who was assigned to each OC.
@@ -1329,17 +1358,17 @@ app.get('/api/ocs', async (req, res) => {
 app.post('/api/optimize', rateLimit('optimize'), async (req, res) => {
   const key = req.headers['x-oca-key'] || req.query.key;
   const owner = await validateKey(req, res); if (!owner) return;
-  const {ocs, requestingMember} = req.body;
+  const {ocs, requestingMember, mode = 'spread'} = req.body;
   if (!Array.isArray(ocs) || ocs.length === 0) return res.status(400).json({error:'ocs must be non-empty array'});
   const factionId = getFactionId(key);
   // Normalise OC names from client (Torn may send different capitalisation)
   const normalizedOCs = ocs.map(o => ({...o, ocName: normOCName(o.ocName)}));
 
-  const cacheKey  = hashObject({ocs: normalizedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember});
+  const cacheKey  = hashObject({ocs: normalizedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember, mode});
   const cached = await getCachedOptimize(factionId, cacheKey);
   if (cached) return res.json({...cached, cached:true});
   try {
-    const result = await optimizeFaction(factionId, normalizedOCs, requestingMember);
+    const result = await optimizeFaction(factionId, normalizedOCs, requestingMember, mode);
     await setCachedOptimize(factionId, cacheKey, result);
     res.json({...result, cached:false});
   } catch(e) {
@@ -1780,7 +1809,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.4.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.5.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
