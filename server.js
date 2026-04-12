@@ -1573,6 +1573,57 @@ app.get('/api/assignments', rateLimit('assignments'), async (req, res) => {
   } catch(e) { res.status(500).json({error:'Failed to load assignments'}); }
 });
 
+// ── /api/cpr/member ───────────────────────────────────────────
+// Accepts CPR data submitted by a member using their own member OCA key.
+// The member's Torn API key is used client-side to pull CPR — it never
+// reaches this server. Only the extracted CPR payload is sent here.
+// member_api data wins over tornstats at the OC level on conflict.
+app.post('/api/cpr/member', rateLimit('cpr'), async (req, res) => {
+  const key = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res); if (!owner) return;
+
+  const { memberName, cprs } = req.body;
+  if (!memberName || typeof memberName !== 'string' || !memberName.trim()) {
+    return res.status(400).json({ error: 'memberName required' });
+  }
+  if (!cprs || typeof cprs !== 'object' || !Object.keys(cprs).length) {
+    return res.status(400).json({ error: 'cprs required' });
+  }
+
+  const factionId = getFactionId(key);
+  const name      = memberName.trim();
+
+  // Validate CPR values — each must be a number 0-100
+  for (const [ocName, roles] of Object.entries(cprs)) {
+    if (typeof roles !== 'object') return res.status(400).json({ error: `Invalid cprs for OC: ${ocName}` });
+    for (const [role, val] of Object.entries(roles)) {
+      if (typeof val !== 'number' || val < 0 || val > 100) {
+        return res.status(400).json({ error: `Invalid CPR value for ${ocName}/${role}: ${val}` });
+      }
+    }
+  }
+
+  try {
+    // member_api data wins over tornstats — merge incoming on top of existing
+    await query(
+      `INSERT INTO member_cpr (faction_id, member_name, source, cprs, updated_at)
+       VALUES ($1, $2, 'member_api', $3, NOW())
+       ON CONFLICT (faction_id, member_name)
+       DO UPDATE SET
+         cprs       = member_cpr.cprs || $3::jsonb,
+         source     = 'member_api',
+         updated_at = NOW()`,
+      [factionId, name, JSON.stringify(cprs)]
+    );
+    await invalidateCache(factionId);
+    console.log(`[CPR MEMBER] Updated ${name} in faction ${factionId} — ${Object.keys(cprs).length} OCs`);
+    res.json({ ok: true, memberName: name, factionId, ocCount: Object.keys(cprs).length });
+  } catch(e) {
+    console.error('[CPR MEMBER] Error:', e.message);
+    res.status(500).json({ error: 'Failed to save member CPR' });
+  }
+});
+
 app.post('/api/keys/migrate', async (req, res) => {
   const token = req.headers['x-migrate-token'];
   if (!token || token !== process.env.MIGRATE_TOKEN) return res.status(403).json({error:'Invalid token'});
@@ -1729,7 +1780,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.3.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.4.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
