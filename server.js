@@ -998,6 +998,31 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
     return penalty;
   }
 
+  // ── Controlled mode: pre-compute member ceilings ─────────────
+  // Ceiling = highest OC level where member has at least one role meeting idealMin.
+  // In Controlled mode, member is only eligible for OCs at ceiling or ceiling-1.
+  const memberCeilings = {};
+  if (objective === 'controlled') {
+    const CONTROLLED_FLOOR_BUFFER = 5; // idealMin + 5 is the effective floor
+    for (const member of memberPool) {
+      const d = memberCPRMap[member.name];
+      let ceiling = 0;
+      if (d?.cprs) {
+        for (const [ocName, roles] of Object.entries(d.cprs)) {
+          const ocLevel = FLOWCHARTS[normOCName(ocName)]?.level ?? 1;
+          for (const [role, cpr] of Object.entries(roles)) {
+            const ocsR    = getOCSRole(ocName, role);
+            const idealMin = ocsR?.idealMin ?? getRoleCPRRange(role).idealMin;
+            const controlledFloor = idealMin + CONTROLLED_FLOOR_BUFFER;
+            if (cpr >= controlledFloor && ocLevel > ceiling) ceiling = ocLevel;
+          }
+        }
+      }
+      memberCeilings[member.name] = ceiling;
+    }
+    console.log('[OPTIMIZER] Controlled mode ceilings:', Object.entries(memberCeilings).map(([n,c]) => `${n}:L${c}`).join(' '));
+  }
+
   // ── Build impact matrix ───────────────────────────────────────
   const impactMatrix = {};
   for (const member of memberPool) {
@@ -1023,8 +1048,32 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
 
         // ── BLOCKING RULES ───────────────────────────────────────
         const ocLevel_ = FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1;
+
+        // Controlled objective: apply ceiling filter and raised floor
+        if (objective === 'controlled' && !isFree) {
+          const ceiling = memberCeilings[member.name] || 0;
+          // Block if OC is more than 1 level below member's ceiling
+          // (ceiling=0 means no qualifying OC found — allow placement anywhere)
+          if (ceiling > 0 && ocLevel_ < ceiling - 1) {
+            impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_ceiling', delta: 0, ocsRole, blocked: true };
+            continue;
+          }
+          // Raised floor: idealMin + 5 instead of absMin
+          if (cpr !== null) {
+            const idealMin = ocsRole?.idealMin ?? getRoleCPRRange(role).idealMin;
+            const controlledFloor = idealMin + 5;
+            if (cpr < controlledFloor) {
+              impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_controlled_floor', delta: 0, ocsRole, blocked: true };
+              continue;
+            }
+          } else if (flag === 'no_data' || flag === 'cpr_unknown') {
+            impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
+            continue;
+          }
+        }
+
         if (isFree || ocLevel_ === 1) {
-          // FREE slots and L1 OCs: accept everyone
+          // FREE slots and L1 OCs: accept everyone (in Aggressive mode)
         } else if (isCrit) {
           // CRITICAL roles: must have known CPR ≥ absMin
           if (flag === 'no_data' || flag === 'cpr_unknown') {
@@ -1078,7 +1127,7 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
 
         // ── Scoring by objective ──────────────────────────────
         let priorityScore;
-        if (objective === 'efficient') {
+        if (objective === 'controlled') {
           // Efficient: delta is king — assign where you help the most
           // FREE roles get minimal score in efficient mode (delta ≈ 0 anyway)
           if (impact.ocsRole?.tier === 'FREE') {
@@ -1398,15 +1447,17 @@ app.post('/api/optimize', rateLimit('optimize'), async (req, res) => {
   const key = req.headers['x-oca-key'] || req.query.key;
   const owner = await validateKey(req, res); if (!owner) return;
   const {ocs, requestingMember, mode = 'spread', objective = 'aggressive'} = req.body;
+  // Support legacy 'efficient' name — map to 'controlled'
+  const resolvedObjective = objective === 'efficient' ? 'controlled' : objective;
   if (!Array.isArray(ocs) || ocs.length === 0) return res.status(400).json({error:'ocs must be non-empty array'});
   const factionId = getFactionId(key);
   const normalizedOCs = ocs.map(o => ({...o, ocName: normOCName(o.ocName)}));
 
-  const cacheKey  = hashObject({ocs: normalizedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember, mode, objective});
+  const cacheKey  = hashObject({ocs: normalizedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember, mode, objective: resolvedObjective});
   const cached = await getCachedOptimize(factionId, cacheKey);
   if (cached) return res.json({...cached, cached:true});
   try {
-    const result = await optimizeFaction(factionId, normalizedOCs, requestingMember, mode, objective);
+    const result = await optimizeFaction(factionId, normalizedOCs, requestingMember, mode, resolvedObjective);
     await setCachedOptimize(factionId, cacheKey, result);
     res.json({...result, cached:false});
   } catch(e) {
@@ -2082,7 +2133,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.6.4 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.5 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
