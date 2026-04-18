@@ -392,8 +392,8 @@ const OCS_ROLES = {
   'Best of the Lot': {
     'Muscle':     C(50,65),   // score=100 dominant
     'Imitator':   I(40,60),   // score=65.5
-    'Picklock':   F(),        // score=30.6 FREE
-    'Car Thief':  F(),        // score=5.7  FREE
+    'Picklock':   I(40,60),   // weight=20.7% IMPORTANT (was FREE — weight overrules weak score)
+    'Car Thief':  I(40,60),   // weight=19.5% IMPORTANT (was FREE — weight overrules wrong score)
     'Thief':      F(),        // score=5.7  FREE
   },
   'Cash Me If You Can': {
@@ -661,6 +661,12 @@ function ocsRolePriority(ocName, role) {
 }
 
 function getRoleBase(role) { return (role||'').replace(/\s+\d+$/,''); }
+function normRole(role) {
+  if (!role) return '';
+  // Normalise role names from slot_cprs storage:
+  // "Muscle #1" → "Muscle 1", strip extra whitespace
+  return role.trim().replace(/\s*#\s*/g, ' ').replace(/\s+/g, ' ');
+}
 function getRoleCPRRange(role) {
   const base = getRoleBase(role);
   return ROLE_CPR_RANGES[role] || ROLE_CPR_RANGES[base] || {idealMin:58,idealMax:74,absMin:50,overQual:85,safe:false};
@@ -1617,6 +1623,184 @@ app.get('/api/payout/model', async (req, res) => {
   } catch(e) { res.status(500).json({error:'Failed to load payout model'}); }
 });
 
+// ── /api/analyze/:ocName ──────────────────────────────────────
+// Leader only. Runs regression on oc_payouts slot_cprs data to infer
+// role importance from your faction's own OC history.
+// Returns per-role slope, relative weight, suggested tier, and CPR buckets.
+// Minimum 10 samples per role for a confident suggestion.
+app.get('/api/analyze/:ocName', async (req, res) => {
+  const key = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res); if (!owner) return;
+  if (!isLeaderKey(key)) return res.status(403).json({error:'Leader key required'});
+  const factionId = getFactionId(key);
+  const ocName    = normOCName(decodeURIComponent(req.params.ocName));
+
+  try {
+    // Fetch all rows for this OC
+    const r = await query(
+      `SELECT max_money, money, slot_cprs, payout_pct FROM oc_payouts
+       WHERE faction_id=$1 AND oc_name=$2 ORDER BY executed_at DESC`,
+      [factionId, ocName]
+    );
+
+    if (!r.rows.length) {
+      return res.status(404).json({error:`No history found for "${ocName}"`, ocName});
+    }
+
+    const totalRuns = r.rows.length;
+    const successRuns = r.rows.filter(row => row.money > 0).length;
+    const overallSuccessRate = Math.round((successRuns / totalRuns) * 100);
+
+    // ── Per-role data collection ──────────────────────────────
+    // For each role, collect (cpr, max_money) pairs from runs where that role was filled
+    const roleData = {};   // role → { pairs: [{cpr, payout, success}] }
+
+    r.rows.forEach(row => {
+      const slotCPRs = row.slot_cprs || {};
+      const maxMoney = parseInt(row.max_money) || 0;
+      const success  = row.money > 0;
+
+      Object.entries(slotCPRs).forEach(([roleRaw, cpr]) => {
+        // Normalise role name — strip trailing numbers, normalise base
+        const role = normRole(roleRaw) || roleRaw;
+        if (!cpr || cpr <= 0 || cpr > 100) return;
+        if (!roleData[role]) roleData[role] = { pairs: [] };
+        roleData[role].pairs.push({ cpr: parseInt(cpr), payout: maxMoney, success });
+      });
+    });
+
+    // ── Linear regression helper ──────────────────────────────
+    // Returns { slope, intercept, r2, n }
+    function linReg(pairs) {
+      const n = pairs.length;
+      if (n < 2) return { slope: 0, intercept: 0, r2: 0, n };
+      const sumX  = pairs.reduce((s, p) => s + p.cpr, 0);
+      const sumY  = pairs.reduce((s, p) => s + p.payout, 0);
+      const sumXY = pairs.reduce((s, p) => s + p.cpr * p.payout, 0);
+      const sumX2 = pairs.reduce((s, p) => s + p.cpr * p.cpr, 0);
+      const meanX = sumX / n;
+      const meanY = sumY / n;
+      const denom = sumX2 - n * meanX * meanX;
+      if (denom === 0) return { slope: 0, intercept: meanY, r2: 0, n };
+      const slope     = (sumXY - n * meanX * meanY) / denom;
+      const intercept = meanY - slope * meanX;
+      // R²
+      const ssTot = pairs.reduce((s, p) => s + Math.pow(p.payout - meanY, 2), 0);
+      const ssRes = pairs.reduce((s, p) => s + Math.pow(p.payout - (slope * p.cpr + intercept), 2), 0);
+      const r2    = ssTot === 0 ? 0 : Math.max(0, 1 - ssRes / ssTot);
+      return { slope: Math.round(slope), intercept: Math.round(intercept), r2: parseFloat(r2.toFixed(3)), n };
+    }
+
+    // ── CPR success buckets ───────────────────────────────────
+    function cprBuckets(pairs) {
+      const buckets = {'40-49':{runs:0,success:0},'50-59':{runs:0,success:0},'60-69':{runs:0,success:0},'70-79':{runs:0,success:0},'80+':{runs:0,success:0}};
+      pairs.forEach(({ cpr, success }) => {
+        const k = cpr >= 80 ? '80+' : cpr >= 70 ? '70-79' : cpr >= 60 ? '60-69' : cpr >= 50 ? '50-59' : '40-49';
+        buckets[k].runs++;
+        if (success) buckets[k].success++;
+      });
+      // Add successRate and filter empty buckets
+      const result = {};
+      Object.entries(buckets).forEach(([k, v]) => {
+        if (v.runs > 0) result[k] = { runs: v.runs, successRate: parseFloat((v.success / v.runs).toFixed(2)) };
+      });
+      return result;
+    }
+
+    // ── Suggested absMin/idealMin from bucket data ────────────
+    function suggestThresholds(pairs) {
+      const b = cprBuckets(pairs);
+      const entries = Object.entries(b).sort((a,b) => parseInt(a[0]) - parseInt(b[0]));
+      // absMin = lowest bucket where success rate >= 0.50
+      // idealMin = lowest bucket where success rate >= 0.75
+      let absMin = null, idealMin = null;
+      const midpoints = {'40-49':45,'50-59':55,'60-69':65,'70-79':75,'80+':82};
+      entries.forEach(([k, v]) => {
+        if (v.successRate >= 0.50 && absMin === null)   absMin   = midpoints[k];
+        if (v.successRate >= 0.75 && idealMin === null) idealMin = midpoints[k];
+      });
+      return { absMin, idealMin };
+    }
+
+    // ── Build per-role analysis ───────────────────────────────
+    const roles = {};
+    const slopes = {};
+
+    Object.entries(roleData).forEach(([role, { pairs }]) => {
+      const reg = linReg(pairs);
+      slopes[role] = Math.max(0, reg.slope); // floor at 0 — negative slopes are noise
+      roles[role] = {
+        samples:    reg.n,
+        meanCPR:    parseFloat((pairs.reduce((s,p) => s + p.cpr, 0) / pairs.length).toFixed(1)),
+        slope:      reg.slope,
+        r2:         reg.r2,
+        buckets:    cprBuckets(pairs),
+        thresholds: suggestThresholds(pairs),
+        insufficient: reg.n < 10,
+      };
+    });
+
+    // ── Relative weight: normalise slopes to 0-1 ─────────────
+    const totalSlope = Object.values(slopes).reduce((s, v) => s + v, 0);
+    const CRIT_W = 0.30, FREE_W = 0.08;
+
+    Object.entries(roles).forEach(([role, data]) => {
+      const relativeWeight = totalSlope > 0 ? parseFloat((slopes[role] / totalSlope).toFixed(3)) : 0;
+      data.relativeWeight = relativeWeight;
+
+      // Suggested tier from relative weight
+      if (data.insufficient) {
+        data.suggestedTier = 'INSUFFICIENT_DATA';
+      } else if (relativeWeight >= CRIT_W) {
+        data.suggestedTier = 'CRITICAL';
+      } else if (relativeWeight >= FREE_W) {
+        data.suggestedTier = 'IMPORTANT';
+      } else {
+        data.suggestedTier = 'FREE';
+      }
+
+      // Compare against our current OCS_ROLES
+      const current = OCS_ROLES[ocName]?.[role] || OCS_ROLES[ocName]?.[role.replace(/\s+\d+$/,'')];
+      data.currentTier = current?.tier || 'UNMAPPED';
+      data.match = data.currentTier === data.suggestedTier;
+    });
+
+    // Sort roles by relative weight desc
+    const sortedRoles = Object.fromEntries(
+      Object.entries(roles).sort((a,b) => b[1].relativeWeight - a[1].relativeWeight)
+    );
+
+    // ── Disagreement summary ──────────────────────────────────
+    const disagreements = Object.entries(sortedRoles)
+      .filter(([, d]) => !d.match && d.suggestedTier !== 'INSUFFICIENT_DATA' && d.currentTier !== 'UNMAPPED')
+      .map(([role, d]) => ({
+        role,
+        current:   d.currentTier,
+        suggested: d.suggestedTier,
+        weight:    d.relativeWeight,
+        samples:   d.samples,
+        direction: (d.currentTier === 'FREE' && d.suggestedTier !== 'FREE') ? 'UNDER_CLASSIFIED'
+                 : (d.currentTier === 'CRITICAL' && d.suggestedTier !== 'CRITICAL') ? 'OVER_CLASSIFIED'
+                 : 'MISMATCH',
+      }));
+
+    console.log(`[ANALYZE] ${ocName}: ${totalRuns} runs, ${Object.keys(roles).length} roles analyzed, ${disagreements.length} disagreements`);
+
+    res.json({
+      ocName,
+      totalRuns,
+      successRuns,
+      overallSuccessRate,
+      roles: sortedRoles,
+      disagreements,
+      note: 'Suggested tiers based on your faction data. CRITICAL>=30% weight, IMPORTANT>=8%, FREE<8%. Min 10 samples for confidence.',
+    });
+  } catch(e) {
+    console.error('[ANALYZE] Error:', e.message);
+    res.status(500).json({error:'Analysis failed: ' + e.message});
+  }
+});
+
 app.post('/api/assign', rateLimit('assign'), async (req, res) => {
   const key = req.headers['x-oca-key'] || req.query.key;
   const owner = await validateKey(req, res); if (!owner) return;
@@ -1880,7 +2064,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.6.1 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.2 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
