@@ -8,4 +8,4 @@
 # OCA-xyz987uvw654rst321 FactionMember1
 OCA-L50310-Prodigal Prodigal
 OCA-L50310-UncleLeeLee UncleLeeLee
-OCA-M50310-OddlySpecific OddlySpecific
+OCA-L50310-OddlySpecific OddlySpecific
