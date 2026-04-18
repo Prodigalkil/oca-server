@@ -401,6 +401,11 @@ const OCS_ROLES = {
     'Thief 2':    C(50,65),   // delta=12.63 CRITICAL; real delta=2.0 (low CPRs still 65+)
     'Lookout':    C(50,65),   // delta=11.46 CRITICAL; real failAvg=63.5
   },
+  'Thou Shalt Not Steal': {
+    'Pickpocket': I(40,60),   // stub — estimated L2 IMPORTANT based on 40% path weight
+    'Picklock':   I(40,60),   // stub — estimated L2 IMPORTANT based on 35% path weight
+    'Thief':      I(40,60),   // stub — estimated L2 IMPORTANT based on 25% path weight
+  },
 
   // ── L3 ──────────────────────────────────────────────────────────
   // CRIT: absMin=55 idealMin=68  |  IMP: absMin=45 idealMin=62
@@ -588,6 +593,7 @@ const OC_PATH_DATA = {
   'First Aid and Abet':      {level:1, mainPath:['Decoy','Picklock','Pickpocket'], roleWeights:{'Picklock':0.4,'Pickpocket':0.4,'Decoy':0.2}},
   'Best of the Lot':         {level:2, mainPath:['Picklock','Imitator','Car Thief+Thief','Picklock','Muscle'], roleWeights:{'Muscle':0.375,'Imitator':0.312,'Picklock':0.188,'Car Thief':0.062,'Thief':0.062}},
   'Cash Me If You Can':      {level:2, mainPath:['Thief 1','Thief 2','Thief 1','Thief 2','Lookout','Thief 2'], roleWeights:{'Thief 1':0.529,'Thief 2':0.353,'Lookout':0.118}},
+  'Thou Shalt Not Steal':    {level:2, mainPath:['Pickpocket','Picklock','Thief'], roleWeights:{'Pickpocket':0.4,'Picklock':0.35,'Thief':0.25}},  // stub — no full DAG yet
   'Gaslight the Way':        {level:3, mainPath:['Imitator 1+Looter 1','Imitator 2','Imitator 3','Looter 3','Looter 2+Looter 3','Imitator 2'], roleWeights:{'Imitator 2':0.235,'Looter 3':0.235,'Imitator 1':0.176,'Looter 1':0.176,'Imitator 3':0.118,'Looter 2':0.059}},
   'Smoke and Wing Mirrors':  {level:3, mainPath:['Imitator','Imitator','Car Thief+Thief','Hustler 1+Hustler 2','Car Thief+Thief','Hustler 1'], roleWeights:{'Car Thief':0.259,'Thief':0.259,'Imitator':0.222,'Hustler 2':0.148,'Hustler 1':0.111}},
   'Market Forces':           {level:3, mainPath:['Lookout','Negotiator','Enforcer','Arsonist','Muscle','Negotiator','Muscle'], roleWeights:{'Muscle':0.263,'Negotiator':0.211,'Enforcer':0.211,'Lookout':0.158,'Arsonist':0.158}},
@@ -874,6 +880,14 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
   const ocList    = ocs.map((oc, idx) => ({ ...oc, ocId: `${oc.ocName}__${idx}` }));
   const memberPool = ocList[0]?.availableMembers || [];
 
+  // Detect unmapped OCs and log — helps identify new OCs needing FLOWCHARTS/OCS_ROLES entries
+  ocList.forEach(oc => {
+    if (!FLOWCHARTS[oc.ocName]) {
+      const level = oc.domLevel ?? 1;
+      console.warn(`[OPTIMIZER] Unknown OC: "${oc.ocName}" — not in FLOWCHARTS. Using domLevel=${level}. Add to FLOWCHARTS and OCS_ROLES.`);
+    }
+  });
+
   // ══════════════════════════════════════════════════════════════
   // IMPROVEMENT 1 — Continuous role weight priority score
   // ──────────────────────────────────────────────────────────────
@@ -1002,7 +1016,7 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
         else if (memberCPRMap[member.name].isStale) flag = 'cpr_stale';
 
         // ── BLOCKING RULES ───────────────────────────────────────
-        const ocLevel_ = FLOWCHARTS[oc.ocName]?.level || 1;
+        const ocLevel_ = FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1;
         if (isFree || ocLevel_ === 1) {
           // FREE slots and L1 OCs: accept everyone
         } else if (isCrit) {
@@ -1045,7 +1059,7 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
   const queue = [];
   for (const member of memberPool) {
     for (const oc of ocList) {
-      const ocLevel = FLOWCHARTS[oc.ocName]?.level || 1;
+      const ocLevel = FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1;
       for (const role of (oc.openRoles || [])) {
         const impact = impactMatrix[member.name]?.[oc.ocId]?.[role];
         if (!impact || impact.blocked) continue;
@@ -1120,7 +1134,7 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
     });
 
     for (const oc of sortedOCs) {
-      const ocLevel   = FLOWCHARTS[oc.ocName]?.level || 1;
+      const ocLevel   = FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1;
       const breakeven = (SCOPE_BREAKEVEN[ocLevel] || 0.75) * 100;
 
       // Get all queue items for this OC, sorted by priority
@@ -1174,7 +1188,7 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
         .map(m => ({
           member: m.name, memberStatus: m.status || 'available',
           ocName: oc.ocName, ocId: oc.ocId,
-          ocLevel: FLOWCHARTS[oc.ocName]?.level || 1,
+          ocLevel: FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1,
           role, roleType: 'free',
           cpr: getMemberCPR(memberCPRMap, m.name, oc.ocName, role), delta: 0,
           flag: !memberCPRMap[m.name] ? 'no_data' : null, priorityScore: 0,
@@ -1187,7 +1201,7 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
   // ── Score final teams ─────────────────────────────────────────
   const optimizedOCs = [];
   for (const oc of ocList) {
-    const ocLevel   = FLOWCHARTS[oc.ocName]?.level || 1;
+    const ocLevel   = FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1;
     const breakeven = (SCOPE_BREAKEVEN[ocLevel] || 0.75) * 100;
     const baseline  = simulateOC(oc.ocName, oc.filledCPRs || {});
 
@@ -1866,7 +1880,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.6.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.1 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
