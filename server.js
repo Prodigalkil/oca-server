@@ -436,7 +436,7 @@ const OCS_ROLES = {
   'Snow Blind': {
     'Hustler':    C(55,68),   // delta=17.79 CRITICAL confirmed
     'Imitator':   C(55,68),   // delta=10.54 CRITICAL confirmed
-    'Muscle 1':   F(),        // delta=3.15 FREE confirmed
+    'Muscle 1':   I(45,62),   // weight=36% faction data — was UNMAPPED, confirmed IMPORTANT (50-59 CPR only 60% success)
     'Muscle 2':   F(),        // delta=3.15 FREE confirmed
   },
   'Stage Fright': {
@@ -2064,7 +2064,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.6.2 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.3 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
