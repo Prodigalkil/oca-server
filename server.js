@@ -477,12 +477,12 @@ const OCS_ROLES = {
   // ── L6 ──────────────────────────────────────────────────────────
   // CRIT: absMin=58 idealMin=70  |  IMP: absMin=50 idealMin=65
   'Bidding War': {
-    'Robber 3':   I(50,65),   // delta=9.73 IMPORTANT confirmed
+    'Robber 3':   I(50,65),   // delta=9.73 IMPORTANT confirmed — highest weight role (31.7%)
     'Driver':     I(50,65),   // delta=8.95 IMPORTANT (was CRITICAL — corrected)
     'Robber 2':   I(50,65),   // delta=7.44 IMPORTANT (was CRITICAL — corrected)
     'Bomber 2':   I(50,65),   // delta=5.69 IMPORTANT (was FREE — corrected)
-    'Bomber 1':   F(),        // delta=2.59 FREE
-    'Robber 1':   F(),        // delta=2.59 FREE
+    'Bomber 1':   I(50,65),   // delta=2.59 IMPORTANT (was FREE — blocks low CPR same-level fallback)
+    'Robber 1':   I(50,65),   // delta=2.59 IMPORTANT (was FREE — corrected)
   },
   'Leave No Trace': {
     'Imitator':   C(58,70),   // delta=15.44 CRITICAL; real failAvg=52.4 — strong confirmation
@@ -1463,7 +1463,7 @@ app.get('/api/cpr/status', async (req, res) => {
   } catch(e) { res.status(500).json({error:'Failed to load CPR status'}); }
 });
 
-app.post('/api/cpr/cleanup', async (req, res) => {
+app.post('/api/cpr/cleanup', rateLimit('cpr'), async (req, res) => {
   const key = req.headers['x-oca-key'] || req.query.key;
   const owner = await validateKey(req, res); if (!owner) return;
   if (!isLeaderKey(key)) return res.status(403).json({error:'Leader key required'});
@@ -1473,6 +1473,32 @@ app.post('/api/cpr/cleanup', async (req, res) => {
     await invalidateCache(factionId);
     res.json({ok:true, removed:r.rowCount});
   } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+// ── /api/cpr/purge ────────────────────────────────────────────
+// Leader only. Removes specific named members from member_cpr.
+// Used to purge ex-members whose data persists after they leave.
+app.post('/api/cpr/purge', rateLimit('cpr'), async (req, res) => {
+  const key = req.headers['x-oca-key'] || req.query.key;
+  const owner = await validateKey(req, res); if (!owner) return;
+  if (!isLeaderKey(key)) return res.status(403).json({error:'Leader key required'});
+  const factionId = getFactionId(key);
+  const { members } = req.body;
+  if (!Array.isArray(members) || !members.length) return res.status(400).json({error:'members array required'});
+  try {
+    let removed = 0;
+    for (const name of members) {
+      if (typeof name !== 'string' || !name.trim()) continue;
+      const r = await query('DELETE FROM member_cpr WHERE faction_id=$1 AND member_name=$2', [factionId, name.trim()]);
+      removed += r.rowCount;
+    }
+    await invalidateCache(factionId);
+    console.log(`[CPR PURGE] Removed ${removed} ex-members from faction ${factionId}`);
+    res.json({ok:true, removed, requested:members.length});
+  } catch(e) {
+    console.error('[CPR PURGE] Error:', e.message);
+    res.status(500).json({error:'Purge failed: '+e.message});
+  }
 });
 
 app.get('/api/roles', async (req, res) => {
@@ -1501,7 +1527,38 @@ app.get('/api/roles', async (req, res) => {
       roleContext[ocName][role] = {color, checkpoints:info.checkpoints, deadEnds:info.deadEnds, recoveries:info.recoveries, isStart:info.isStart, desc};
     });
   });
-  res.json({roles:ROLE_COLORS, context:roleContext});
+
+  // Build OCS_ROLES display data — tier, absMin, idealMin, safe flag, safety text
+  // Generated from server OCS_ROLES so UI always matches optimizer
+  const ocsRolesDisplay = {};
+  Object.entries(OCS_ROLES).forEach(([ocName, roles]) => {
+    ocsRolesDisplay[ocName] = {};
+    Object.entries(roles).forEach(([role, r]) => {
+      const isCrit = r.tier === 'CRITICAL';
+      const isFree = r.tier === 'FREE';
+      const safetyIcon = isFree ? '🟢' : isCrit ? '🔴' : '🟠';
+      const tierLabel  = isFree ? 'FREE SLOT' : isCrit ? 'CRITICAL' : 'IMPORTANT';
+      const rangeStr   = isFree ? 'Any CPR — free role' : `Needs ${r.absMin}–${Math.min(r.idealMin+6,99)}%`;
+      const safety = isFree
+        ? `${safetyIcon} FREE SLOT — CPR has negligible impact. Any member accepted.`
+        : `${safetyIcon} ${tierLabel} — ${rangeStr}`;
+      ocsRolesDisplay[ocName][role] = {
+        tier:     r.tier,
+        absMin:   r.absMin,
+        idealMin: r.idealMin,
+        safe:     isFree,
+        crit:     isCrit,
+        safety,
+      };
+    });
+  });
+
+  res.json({
+    roles:        ROLE_COLORS,
+    context:      roleContext,
+    ocsRoles:     ocsRolesDisplay,
+    roleCPRRanges: ROLE_CPR_RANGES,
+  });
 });
 
 app.post('/api/payout/record', rateLimit('cpr_history'), async (req, res) => {
@@ -1809,7 +1866,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.5.0 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.0 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
