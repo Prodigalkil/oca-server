@@ -312,6 +312,13 @@ setInterval(async () => {
 // ═══════════════════════════════════════════════════════════════
 
 const SCOPE_BREAKEVEN = {1:0.50,2:0.60,3:0.67,4:0.72,5:0.77,6:0.80,7:0.83,8:0.86,9:0.90};
+
+// IMPORTANT roles: effective placement floor = absMin + 60% of gap to idealMin
+// Prevents placing members who technically qualify but will almost certainly fail their checkpoint.
+// CRITICAL roles keep their existing absMin — already strict enough.
+// L1 IMPORTANT roles bypass this (low CPR members still fill L1s for CE gains).
+// Example: L6 IMPORTANT (absMin=50, idealMin=65, gap=15) → floor = 50 + 9 = 59
+const IMPORTANT_PLACEMENT_FLOOR_RATIO = 0.60; // 60% of gap from absMin to idealMin
 const SAFE_ROLES = ['Looter','Lookout','Arsonist','Decoy'];
 
 const ROLE_CPR_RANGES = {
@@ -1085,14 +1092,28 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
             continue;
           }
         } else {
-          // IMPORTANT roles: block no_data AND cpr_unknown (unknown CPR = don't place)
+          // IMPORTANT roles: block no_data AND cpr_unknown
           if (flag === 'no_data' || flag === 'cpr_unknown') {
             impactMatrix[member.name][oc.ocId][role] = { cpr: null, flag, delta: 0, ocsRole, blocked: true };
             continue;
           }
-          if (cpr !== null && cpr < absMin) {
-            impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, ocsRole, blocked: true };
-            continue;
+          if (cpr !== null) {
+            // Hard floor: never below absMin
+            if (cpr < absMin) {
+              impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_min', delta: 0, ocsRole, blocked: true };
+              continue;
+            }
+            // Soft floor for L2+ OCs: absMin + 60% of gap to idealMin
+            // L1 OCs bypass this — weak members should still fill L1 IMPORTANT roles for CE
+            if (ocLevel_ >= 2) {
+              const idealMin_ = ocsRole?.idealMin ?? getRoleCPRRange(role).idealMin;
+              const gap = Math.max(0, idealMin_ - absMin);
+              const impFloor = Math.round(absMin + gap * IMPORTANT_PLACEMENT_FLOOR_RATIO);
+              if (cpr < impFloor) {
+                impactMatrix[member.name][oc.ocId][role] = { cpr, flag: 'below_placement_floor', delta: 0, ocsRole, blocked: true };
+                continue;
+              }
+            }
           }
         }
 
@@ -2133,7 +2154,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.6.5 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.6 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
