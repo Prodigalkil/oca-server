@@ -1193,13 +1193,17 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
       }
     }
   }
-  queue.sort((a, b) => b.priorityScore - a.priorityScore);
+  // ── Split queue into IMPORTANT/CRITICAL vs FREE ──────────────
+  // FREE slots are filled in a separate pass after all meaningful roles
+  // are assigned. This prevents strong members being consumed by free slots
+  // at higher-level OCs when they belong in important roles at lower OCs.
+  const mainQueue = queue.filter(item => item.roleType !== 'free');
+  const freeQueue = queue.filter(item => item.roleType === 'free');
+  mainQueue.sort((a, b) => b.priorityScore - a.priorityScore);
 
-  // ── Pass 1: greedy assignment ─────────────────────────────────
-  // spread mode: assign each member to their highest qualifying OC (current default)
-  // stack mode:  fill OCs to scope-breakeven viability before moving to next.
-  //              Sort OCs by level desc, complete each one before starting the next.
-  //              Better for small factions that can't staff multiple L5/L6 teams.
+  // ── Pass 1: greedy assignment — IMPORTANT/CRITICAL roles only ─
+  // spread mode: assign each member to their highest qualifying OC
+  // stack mode:  fill OCs level-desc to completion before moving down
   const usedMembers = new Set();
   const filledRoles = {};
   const assignments = {};
@@ -1221,74 +1225,81 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
   }
 
   if (mode === 'stack') {
-    // Sort OCs by level desc — fill highest-value OCs first
     const sortedOCs = [...ocList].sort((a, b) => {
       const la = FLOWCHARTS[a.ocName]?.level || 1;
       const lb = FLOWCHARTS[b.ocName]?.level || 1;
       return lb - la;
     });
-
     for (const oc of sortedOCs) {
-      const ocLevel   = FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1;
-      const breakeven = (SCOPE_BREAKEVEN[ocLevel] || 0.75) * 100;
-
-      // Get all queue items for this OC, sorted by priority
-      const ocQueue = queue
+      const ocQueue = mainQueue
         .filter(item => item.ocId === oc.ocId && !usedMembers.has(item.member))
         .sort((a, b) => b.priorityScore - a.priorityScore);
-
-      // Fill this OC completely before moving to the next
-      for (const item of ocQueue) {
-        tryAssign(item);
-      }
+      for (const item of ocQueue) { tryAssign(item); }
     }
   } else {
-    // spread mode — original greedy assignment across all OCs simultaneously
-    for (const item of queue) { tryAssign(item); }
+    for (const item of mainQueue) { tryAssign(item); }
   }
 
   // ── Pass 1b: path-penalty re-sort ────────────────────────────
-  // After the first greedy pass, we know who was assigned to each OC.
-  // Re-score remaining queue items using path dependency data from assignments
-  // so that subsequent passes don't stack weak members on the same branch.
-  for (const item of queue) {
-    if (usedMembers.has(item.member)) continue; // already assigned
+  for (const item of mainQueue) {
+    if (usedMembers.has(item.member)) continue;
     if (!item.cpr || item.cpr === null) continue;
-    const ocsR    = getOCSRole(item.ocName, item.role);
+    const ocsR     = getOCSRole(item.ocName, item.role);
     const idealMin = ocsR?.idealMin ?? getRoleCPRRange(item.role).idealMin;
-    if (item.cpr >= idealMin) continue; // strong enough — no path concern
+    if (item.cpr >= idealMin) continue;
     const pathPenalty = computePathPenalty(item.ocName, item.role, assignments[item.ocId], memberCPRMap);
     if (pathPenalty > 0) {
       item.priorityScore = Math.max(0, item.priorityScore - pathPenalty);
     }
   }
-  queue.sort((a, b) => b.priorityScore - a.priorityScore);
+  mainQueue.sort((a, b) => b.priorityScore - a.priorityScore);
 
-  // ── Pass 2: viability check (disabled — members stay at highest OC) ──
+  // ── Pass 2: viability check (disabled) ───────────────────────
   const unfillableOCIds = new Set();
   const releasedMembers = new Set();
 
-  // ── Pass 4: fill FREE slots of unfillable OCs ────────────────
-  // FREE slots accept ANY member — even zero CPR.
-  // Use lowest-CPR available members to preserve strong ones for viable OCs.
-  for (const oc of ocList) {
-    if (!unfillableOCIds.has(oc.ocId)) continue;
+  // ── Pass 3: fill FREE slots ───────────────────────────────────
+  // FREE slots are filled AFTER all IMPORTANT/CRITICAL roles are assigned.
+  // Use the lowest-CPR available member that is level-appropriate so strong
+  // members aren't wasted on roles that have no bearing on success chance.
+  // Sort OCs by level desc so L1s are naturally served by whoever remains.
+  const sortedOCsForFree = [...ocList].sort((a, b) => {
+    const la = FLOWCHARTS[a.ocName]?.level ?? a.domLevel ?? 1;
+    const lb = FLOWCHARTS[b.ocName]?.level ?? b.domLevel ?? 1;
+    return lb - la;
+  });
+
+  for (const oc of sortedOCsForFree) {
+    const ocLevel = FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1;
     for (const role of (oc.openRoles || [])) {
-      const ocsR  = getOCSRole(oc.ocName, role);
-      const isFree = ocsR?.tier === 'FREE';
-      if (!isFree) continue;
+      const ocsR = getOCSRole(oc.ocName, role);
+      if (ocsR?.tier !== 'FREE') continue;
       if (filledRoles[oc.ocId]?.[role]) continue;
+
+      // Candidates: unassigned members, sorted lowest CPR first
+      // Prefer members whose ceiling roughly matches this OC level
+      // to avoid placing L6-calibre members in L1 free slots
       const candidates = memberPool
         .filter(m => !usedMembers.has(m.name))
-        .map(m => ({
-          member: m.name, memberStatus: m.status || 'available',
-          ocName: oc.ocName, ocId: oc.ocId,
-          ocLevel: FLOWCHARTS[oc.ocName]?.level ?? oc.domLevel ?? 1,
-          role, roleType: 'free',
-          cpr: getMemberCPR(memberCPRMap, m.name, oc.ocName, role), delta: 0,
-          flag: !memberCPRMap[m.name] ? 'no_data' : null, priorityScore: 0,
-        }))
-        .sort((a,b) => (a.cpr||0) - (b.cpr||0));
+        .map(m => {
+          const cpr = getMemberCPR(memberCPRMap, m.name, oc.ocName, role);
+          // Score: prefer members whose best OC level is close to this OC level
+          // Lower score = better candidate for free slots (don't waste strong members)
+          const memberCeiling = memberCeilings[m.name] || ocLevel;
+          const levelDiff = Math.abs(memberCeiling - ocLevel);
+          return {
+            member: m.name, memberStatus: m.status || 'available',
+            ocName: oc.ocName, ocId: oc.ocId, ocLevel,
+            role, roleType: 'free',
+            cpr: cpr ?? 0, delta: 0,
+            flag: !memberCPRMap[m.name] ? 'no_data' : null,
+            priorityScore: 0,
+            // Sort: smallest levelDiff first, then lowest CPR (preserve strong members)
+            sortKey: levelDiff * 1000 + (cpr || 0),
+          };
+        })
+        .sort((a, b) => a.sortKey - b.sortKey);
+
       if (candidates.length > 0) tryAssign(candidates[0]);
     }
   }
@@ -2154,7 +2165,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.6.6 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.7 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
