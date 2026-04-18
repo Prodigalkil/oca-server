@@ -1485,13 +1485,62 @@ app.post('/api/optimize', rateLimit('optimize'), async (req, res) => {
   const factionId = getFactionId(key);
   const normalizedOCs = ocs.map(o => ({...o, ocName: normOCName(o.ocName)}));
 
-  const cacheKey  = hashObject({ocs: normalizedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember, mode, objective: resolvedObjective});
-  const cached = await getCachedOptimize(factionId, cacheKey);
-  if (cached) return res.json({...cached, cached:true});
   try {
-    const result = await optimizeFaction(factionId, normalizedOCs, requestingMember, mode, resolvedObjective);
+    // ── Merge leader manual assignments into filledCPRs ──────────
+    // Leader assignments from /api/assign are treated as locked slots —
+    // the optimizer won't reassign those members and treats their CPR as filled.
+    let leaderAssignments = {};
+    if (isLeaderKey(key)) {
+      try {
+        const asgRows = await query(
+          `SELECT torn_name, role, oc_name FROM assignments WHERE faction_id=$1`,
+          [factionId]
+        );
+        asgRows.rows.forEach(row => {
+          if (!leaderAssignments[row.oc_name]) leaderAssignments[row.oc_name] = {};
+          leaderAssignments[row.oc_name][row.role] = row.torn_name;
+        });
+      } catch(e) { console.warn('[OPTIMIZE] Could not load leader assignments:', e.message); }
+    }
+
+    // Load CPR data to resolve member CPR for each locked assignment
+    let memberCPRMap = {};
+    try {
+      const cprRows = await query('SELECT member_name, cprs FROM member_cpr WHERE faction_id=$1', [factionId]);
+      cprRows.rows.forEach(row => { memberCPRMap[row.member_name] = { cprs: row.cprs }; });
+    } catch(e) { console.warn('[OPTIMIZE] CPR preload for assignments:', e.message); }
+
+    // Inject locked assignments into each OC's filledCPRs and remove from openRoles
+    const mergedOCs = normalizedOCs.map(oc => {
+      const locked = leaderAssignments[oc.ocName] || leaderAssignments[normOCName(oc.ocName)] || {};
+      if (!Object.keys(locked).length) return oc;
+
+      const mergedFilledCPRs = { ...(oc.filledCPRs || {}) };
+      const mergedOpenRoles  = [...(oc.openRoles || [])];
+      const mergedExisting   = [...(oc.existingPlacements || [])];
+
+      Object.entries(locked).forEach(([role, memberName]) => {
+        const cpr = getMemberCPR(memberCPRMap, memberName, oc.ocName, role);
+        if (cpr !== null) mergedFilledCPRs[role] = cpr;
+        // Remove from openRoles if it was open
+        const idx = mergedOpenRoles.indexOf(role);
+        if (idx !== -1) mergedOpenRoles.splice(idx, 1);
+        // Add to existingPlacements if not already there
+        if (!mergedExisting.find(p => p.role === role)) {
+          mergedExisting.push({ member: memberName, role, cpr: cpr ?? 0, locked: true });
+        }
+      });
+
+      return { ...oc, filledCPRs: mergedFilledCPRs, openRoles: mergedOpenRoles, existingPlacements: mergedExisting };
+    });
+
+    const cacheKey = hashObject({ocs: mergedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember, mode, objective: resolvedObjective});
+    const cached = await getCachedOptimize(factionId, cacheKey);
+    if (cached) return res.json({...cached, cached:true, lockedSlots: Object.keys(leaderAssignments).length});
+
+    const result = await optimizeFaction(factionId, mergedOCs, requestingMember, mode, resolvedObjective);
     await setCachedOptimize(factionId, cacheKey, result);
-    res.json({...result, cached:false});
+    res.json({...result, cached:false, lockedSlots: Object.keys(leaderAssignments).length});
   } catch(e) {
     console.error('[OPTIMIZE] Error:', e.message);
     res.status(500).json({error:'Optimization failed: '+e.message});
@@ -1679,6 +1728,8 @@ app.get('/api/roles', async (req, res) => {
     context:      roleContext,
     ocsRoles:     ocsRolesDisplay,
     roleCPRRanges: ROLE_CPR_RANGES,
+    flowcharts:   FLOWCHARTS,  // DAG data for client-side simulation
+    baseline:     BASELINE,    // default CPR assumption for empty slots
   });
 });
 
@@ -2165,7 +2216,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.6.7 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.8 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
