@@ -864,7 +864,7 @@ function getMemberCPR(memberCPRs, memberName, ocName, role) {
 const STALE_MS = 7 * 24 * 60 * 60 * 1000;
 function isCPRStale(updatedAt) { return !updatedAt || Date.now() - new Date(updatedAt).getTime() > STALE_MS; }
 
-async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread') {
+async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread', objective = 'aggressive') {
   // ── Load data ─────────────────────────────────────────────────
   let empirical = {};
   try {
@@ -1058,10 +1058,13 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
   }
 
   // ── Build priority queue with new scoring ────────────────────
-  // Score = (ocLevel * 1000)             — higher level always wins globally
-  //       + computeRolePriorityScore()   — continuous DAG weight (replaces 3/2/0)
-  //       + applyIdealMinPenalty()       — penalise below-idealMin on CRITICAL
-  //       + (delta * 10)                 — flowchart simulation delta as tiebreaker
+  // Aggressive objective (default):
+  //   Score = (ocLevel * levelMult) + rolePriority + (delta * 10)
+  //   Higher OC level always wins globally — push members to highest tier possible.
+  // Efficient objective:
+  //   Score = (delta * 500) + rolePriority + (ocLevel * 10)
+  //   Success contribution dominates — assign members where they improve outcome most,
+  //   regardless of OC level. Level becomes a tiebreaker, not the primary driver.
   const queue = [];
   for (const member of memberPool) {
     for (const oc of ocList) {
@@ -1072,6 +1075,36 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
 
         const baseRolePri = computeRolePriorityScore(oc.ocName, role);
         const penalised   = applyIdealMinPenalty(baseRolePri, impact.cpr, role, oc.ocName);
+
+        // ── Scoring by objective ──────────────────────────────
+        let priorityScore;
+        if (objective === 'efficient') {
+          // Efficient: delta is king — assign where you help the most
+          // FREE roles get minimal score in efficient mode (delta ≈ 0 anyway)
+          if (impact.ocsRole?.tier === 'FREE') {
+            priorityScore = ocLevel * 10;
+          } else {
+            priorityScore = (impact.delta * 500) + penalised + (ocLevel * 10);
+          }
+        } else {
+          // Aggressive: level is king — push to highest OC possible
+          if (impact.ocsRole?.tier === 'FREE') {
+            priorityScore = ocLevel * 100;
+          } else {
+            let levelMult = 1000;
+            if (impact.cpr !== null) {
+              const ocsR     = impact.ocsRole;
+              const absMin   = ocsR?.absMin  ?? getRoleCPRRange(role).absMin;
+              const idealMin = ocsR?.idealMin ?? getRoleCPRRange(role).idealMin;
+              const gap = idealMin - absMin;
+              if (gap > 0) {
+                const frac = Math.min(1, Math.max(0, (impact.cpr - absMin) / gap));
+                levelMult = Math.round(500 + 500 * frac);
+              }
+            }
+            priorityScore = (ocLevel * levelMult) + penalised + (impact.delta * 10);
+          }
+        }
 
         queue.push({
           member:        member.name,
@@ -1085,21 +1118,7 @@ async function optimizeFaction(factionId, ocs, requestingMember, mode = 'spread'
           delta:         impact.delta,
           flag:          impact.flag,
           basePri:       baseRolePri,
-          ...((() => {
-            if (impact.ocsRole?.tier === 'FREE') return { priorityScore: ocLevel * 100 };
-            let levelMult = 1000;
-            if (impact.cpr !== null) {
-              const ocsR     = impact.ocsRole;
-              const absMin   = ocsR?.absMin  ?? getRoleCPRRange(role).absMin;
-              const idealMin = ocsR?.idealMin ?? getRoleCPRRange(role).idealMin;
-              const gap = idealMin - absMin;
-              if (gap > 0) {
-                const frac = Math.min(1, Math.max(0, (impact.cpr - absMin) / gap));
-                levelMult = Math.round(500 + 500 * frac);
-              }
-            }
-            return { priorityScore: (ocLevel * levelMult) + penalised + (impact.delta * 10) };
-          })()),
+          priorityScore,
         });
       }
     }
@@ -1378,17 +1397,16 @@ app.get('/api/ocs', async (req, res) => {
 app.post('/api/optimize', rateLimit('optimize'), async (req, res) => {
   const key = req.headers['x-oca-key'] || req.query.key;
   const owner = await validateKey(req, res); if (!owner) return;
-  const {ocs, requestingMember, mode = 'spread'} = req.body;
+  const {ocs, requestingMember, mode = 'spread', objective = 'aggressive'} = req.body;
   if (!Array.isArray(ocs) || ocs.length === 0) return res.status(400).json({error:'ocs must be non-empty array'});
   const factionId = getFactionId(key);
-  // Normalise OC names from client (Torn may send different capitalisation)
   const normalizedOCs = ocs.map(o => ({...o, ocName: normOCName(o.ocName)}));
 
-  const cacheKey  = hashObject({ocs: normalizedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember, mode});
+  const cacheKey  = hashObject({ocs: normalizedOCs.map(o => ({ocName:o.ocName, openRoles:(o.openRoles||[]).sort(), filledCPRs:o.filledCPRs||{}, members:(o.availableMembers||[]).map(m=>m.name).sort()})), requestingMember, mode, objective});
   const cached = await getCachedOptimize(factionId, cacheKey);
   if (cached) return res.json({...cached, cached:true});
   try {
-    const result = await optimizeFaction(factionId, normalizedOCs, requestingMember, mode);
+    const result = await optimizeFaction(factionId, normalizedOCs, requestingMember, mode, objective);
     await setCachedOptimize(factionId, cacheKey, result);
     res.json({...result, cached:false});
   } catch(e) {
@@ -2064,7 +2082,7 @@ app.get('/api/coverage', rateLimit('coverage'), async (req, res) => {
 computeRoleColors();
 startup().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] Hive OC Advisor v3.6.3 running on port ${PORT}`);
+    console.log(`[SERVER] Hive OC Advisor v3.6.4 running on port ${PORT}`);
     console.log(`[SERVER] OCs loaded: ${Object.keys(FLOWCHARTS).length}`);
   });
 }).catch(err => {
